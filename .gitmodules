@@ -1,0 +1,12 @@
+[submodule "ThirdParty/polyscope"]
+	path = ThirdParty/polyscope
+	url = https://github.com/nmwsharp/polyscope
+[submodule "ThirdParty/LBFGSpp"]
+	path = ThirdParty/LBFGSpp
+	url = https://github.com/yixuan/LBFGSpp
+[submodule "ThirdParty/implot"]
+	path = ThirdParty/implot
+	url = https://github.com/epezent/implot
+[submodule "ThirdParty/mma"]
+	path = ThirdParty/mma
+	url = https://github.com/jdumas/mma
