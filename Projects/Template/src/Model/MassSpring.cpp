@@ -4,6 +4,9 @@
 
 #include "CRLHelper/MapleHelper.h"
 
+#include <iostream>
+#include <random>   
+
 void MassSpring::makeConfigMenu() {
     ImGui::InputDouble("Rest Length", &rest_length, 0.05, 0.25, "%.4f");
 
@@ -21,6 +24,62 @@ void MassSpring::makeConfigMenu() {
     ImGui::SetNextItemWidth(150);
     ImGui::InputDouble("##y1", &endpoint1(1), 0.05, 0.25, "%.4f");
 }
+
+void Simulation::makeConfigMenu() {
+    // World parameters
+    ImGui::InputDouble("Time Step", &timeStep, 1e-5, 1e-4, "%.6f");
+
+    // Gravity (Vector3F)
+    ImGui::InputDouble("Gravity", &gravity(1), 0.1, 0.5, "%.2f");
+
+    // Number of particles
+    ImGui::InputInt("Number of Particles", &numParticles);
+
+    // Particle-related parameters
+    ImGui::InputDouble("Mean", &mean, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Standard Deviation", &std, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Density", &density, 10.0, 100.0, "%.2f");
+    ImGui::InputDouble("Contact Bond Normal Stiffness", &contactBondNormalStiffness, 1.0, 5.0, "%.2f");
+    ImGui::InputDouble("Contact Stiffness Ratio", &contactStiffnessRatio, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Interparticle Friction", &interparticleFriction, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Contact Bond Normal Strength", &contactBondNormalStrength, 1.0, 5.0, "%.2f");
+    ImGui::InputDouble("Contact Bond Shear Strength", &contactBondShearStrength, 1.0, 5.0, "%.2f");
+    ImGui::InputDouble("Particle Wall Contact Normal Stiffness", &particleWallContactNormalStiffness, 1.0, 5.0, "%.2f");
+    ImGui::InputDouble("Particle Wall Contact Tangential Stiffness", &particleWallContactTangentialStiffness, 1.0, 5.0, "%.2f");
+    ImGui::InputDouble("Particle Wall Friction", &particleWallFriction, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Translational Damping", &translationalDamping, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Rotational Damping", &rotationalDamping, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Young's Modulus Min", &youngsModulusMin, 1e9, 1e10, "%.2e");
+    ImGui::InputDouble("Young's Modulus Max", &youngsModulusMax, 1e9, 1e10, "%.2e");
+    ImGui::InputDouble("Loading Velocity", &loadingVelocity, 0.01, 0.05, "%.2f");
+
+
+    // Static labels for display.
+    static const std::vector<const char*> poissonChoiceLabels = {"0.05", "0.15", "0.25", "0.35", "0.45"};
+
+    // Determine the current index based on sim.poissonRatio and sim.poissonChoices.
+    int currentIndex = 0;
+    for (int i = 0; i < poissonChoices.size(); i++) {
+        if (std::abs(poissonChoices(i) - poissonRatio) < 1e-6) {
+            currentIndex = i;
+            break;
+        }
+    }
+
+    // Create a single combo box for Poisson Ratio.
+    if (ImGui::Combo("Poisson Ratio", &currentIndex, poissonChoiceLabels.data(), static_cast<int>(poissonChoices.size()))) {
+        // Update the simulation's poissonRatio based on the selected index.
+        poissonRatio = poissonChoices(currentIndex);
+    }
+
+    if (ImGui::Button("↻ Reload Particles")) {
+        // Here you would call your particle creation function.
+        // For example, if you have a function createRandomParticles2D() accessible from this context:
+        particles2D = createRandomParticles2D();
+    }
+
+}
+
 
 void MassSpring::compute_energy(F& value) const {
     VectorXF inputs(6);
@@ -194,4 +253,80 @@ void MassSpring::compute_hessian(SparseMatrixF& hessian) const {
     processMapleOutput(reinterpret_cast<F *>(unknown), hessian_dense, 6, 6);
     hessian = hessian_dense.block(0, 0, 2, 2).sparseView();
     // clang-format on
+}
+
+Particle2D::Particle2D(F radius, const Simulation& simParams)
+    : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
+{
+    // For a 2D disc, mass = area * density.
+    mass = M_PI * radius * radius * simParams.density;
+    // Moment of inertia for a uniform disc about its center: I = 1/2 * m * r^2.
+    inertia = 0.5 * mass * radius * radius;
+}
+
+Particle3D::Particle3D(F radius, const Simulation& sim)
+    : pos(Vector6F::Zero()), vel(Vector6F::Zero()), acc(Vector6F::Zero()), radius(radius)
+{
+    // For a sphere, mass = volume * density.
+    mass = (4.0 / 3.0) * M_PI * std::pow(radius, 3) * sim.density;
+    // Moment of inertia for a solid sphere: I = 2/5 * m * r^2.
+    inertia = (2.0 / 5.0) * mass * radius * radius;
+}
+
+// Function to create a specified number of Particle2D objects with random positions and radii.
+std::vector<Particle2D> Simulation::createRandomParticles2D() {
+    std::vector<Particle2D> particles;
+    particles.reserve(numParticles);
+
+    // Set up random number generators.
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    // Uniform distributions for x and y coordinates within the display.
+    std::uniform_real_distribution<F> distX(-1.0, 1.0);
+    std::uniform_real_distribution<F> distY(-0.5, 0.5);
+
+    // Normal distribution for disk radii.
+    std::normal_distribution<F> radiusDist(mean, std); // mean 0.05, std 0.01
+
+    for (int i = 0; i < numParticles; i++) {
+        bool validCandidate = false;
+        int attempts = 0;
+        Particle2D candidate(0.0, *this); // Use *this instead of 'sim'
+
+        // Try until we find a candidate that doesn't overlap or reach the maximum attempts.
+        while (!validCandidate && attempts < maxAttemptsPerParticle) {
+            attempts++;
+
+            // Generate a random radius and ensure it's positive.
+            F radius = radiusDist(gen);
+            if (radius <= 0)
+                radius = 0.01;
+
+            // Create a candidate particle with the new radius.
+            candidate = Particle2D(radius, *this);
+            candidate.pos = Vector3F(distX(gen), distY(gen), 0.0);
+
+            // Check for overlap with all previously accepted particles.
+            validCandidate = true;
+            for (const auto &existing : particles) {
+                // Only the x and y coordinates are considered.
+                F distance = (candidate.pos.head(2) - existing.pos.head(2)).norm();
+                if (distance < (candidate.radius + existing.radius)) {
+                    validCandidate = false;
+                    break;
+                }
+            }
+        }
+
+        if (validCandidate) {
+            particles.push_back(candidate);
+        } else {
+            std::cerr << "Warning: Could not place particle " << i + 1 << " without overlapping after "
+                      << maxAttemptsPerParticle << " attempts.\n";
+            // Optionally, break out of the loop if placement becomes too difficult.
+        }
+    }
+
+    return particles;
 }

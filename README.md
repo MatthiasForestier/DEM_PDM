@@ -32,3 +32,11 @@ In VSCode, type `control + p`, then type `>Reopen in Container` (with the '>'). 
 The docker build will take a while (30 minutes).
 
 That's it, you're ready to run the app!
+
+### Tips to run project
+1: xhost +local:root
+2: Rebuild
+3: cd build
+4: cmake ..
+5: ninja -j $(nproc)
+6: ./Projects/Template/Template

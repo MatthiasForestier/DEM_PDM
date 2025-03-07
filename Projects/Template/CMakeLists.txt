@@ -4,5 +4,7 @@ set(DEPS Half tbb tbbmalloc tbbmalloc_proxy mkl_intel_lp64 mkl_sequential mkl_co
 file(GLOB_RECURSE HEADERS "include/*.h" "include/*.hpp" "../../CRLHelper/*.h")
 file(GLOB_RECURSE SOURCES "src/*.cpp" "../../CRLHelper/*.cpp")
 
+set(IMGUI_BACKENDS ${CMAKE_SOURCE_DIR}/ThirdParty/polyscope/deps/imgui/imgui/backends)
 add_executable(Template ${HEADERS} ${SOURCES})
+target_include_directories(Template PRIVATE ${IMGUI_BACKENDS})
 target_link_libraries(Template ${DEPS})

@@ -5,8 +5,16 @@
 #include "CRLHelper/CameraHelper.h"
 #include "CRLHelper/Optimization.h"
 #include "CRLHelper/CRLTimer.h"
+#include "CRLHelper/Solvers.h"
 
 #include <iostream>
+#include <random>
+
+
+TemplateApp::TemplateApp(const SplashScreenResult &initParam) {
+    // Simply set use3D in sim based on the splash screen's flag
+    sim.use3D = initParam.use3D;
+}
 
 void TemplateApp::initializeSubApp() {
     /// Initialize camera.
@@ -14,6 +22,20 @@ void TemplateApp::initializeSubApp() {
     app_camera.center = Vector3F(0, 0, 0);
     app_camera.set_up_direction(Vector3F(0, 1, 0));
     app_camera.height = 1;
+    //Initialize particles
+    sim.particles2D = sim.createRandomParticles2D();
+    createOrUpdateSolver();
+}
+
+void TemplateApp::createOrUpdateSolver() {
+    // Clean up if we have an existing solver
+    if (solver) {
+        delete solver;
+        solver = nullptr;
+    }
+
+    // Use the static factory method we defined in Solver.h
+    solver = Solver::createSolver(solverType, &sim);
 }
 
 Optimization::OptimizationStatus TemplateApp::energyMinimizationStep() {
@@ -47,6 +69,9 @@ void TemplateApp::mainLoop() {
     if (optimize) {
         Optimization::OptimizationStatus status = energyMinimizationStep();
     }
+    if (runSimulation && solver) {
+        solver->step(sim.timeStep);
+    }
 }
 
 void TemplateApp::makeConfigWindow() {
@@ -58,24 +83,48 @@ void TemplateApp::makeConfigWindow() {
     ImGui::Spacing();
     ImGui::Spacing();
 
-    if (ImGui::CollapsingHeader("Model", ImGuiTreeNodeFlags_DefaultOpen)) {
-        model.makeConfigMenu();
+    if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        sim.makeConfigMenu();
     }
 }
 
-void TemplateApp::makeAnalysisWindow() {
+void TemplateApp::makeRunCheckWindow() {
+    // --- Existing gradient-check controls ---
     if (ImGui::Button("Check Gradient")) {
         checkGradient(1);
     }
+    ImGui::SameLine();
     if (ImGui::Button("Check Hessian")) {
         checkGradient(2);
     }
+
     ImGui::Text("Epsilon: 10^");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(100);
     ImGui::InputInt("##check_gradient_epsilon", &check_gradient_epsilon_exponent);
     ImGui::SameLine();
     ImGui::Checkbox("Print All##0", &check_gradient_print_all);
+
+    ImGui::Separator(); // a horizontal separator
+
+    // --- New solver selection controls ---
+    static const char* solverNames[] = {"Forward Euler", "Backward Euler"};
+    static int currentSolverIndex = 0;
+    if (ImGui::Combo("Solver Type", &currentSolverIndex, solverNames, IM_ARRAYSIZE(solverNames))) {
+        // Update solverType based on user choice
+        solverType = solverNames[currentSolverIndex];
+        // Recreate or update the solver if needed
+        createOrUpdateSolver();
+    }
+
+    // --- Run / Pause controls ---
+    if (ImGui::Button("Run Simulation")) {
+        runSimulation = true;  // or any other boolean you use to indicate "simulation running"
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Pause Simulation")) {
+        runSimulation = false;
+    }
 }
 
 void TemplateApp::checkGradient(int order) {
@@ -111,47 +160,66 @@ void TemplateApp::checkGradient(int order) {
 }
 
 void TemplateApp::getViewerData(std::vector<CRLViewerData>& viewer_data, CRLCamera& viewer_camera) {
-    /// Copy camera state.
+    // Copy camera state.
     viewer_camera = app_camera;
 
-    /// Initialize a single CRLViewerData struct.
+    // Create a new CRLViewerData for particle disks.
     viewer_data.emplace_back();
-    CRLViewerData& viewer_data_mass_spring = viewer_data.back();
-
-    /// Render fixed spring endpoints as triangle mesh.
-    viewer_data_mass_spring.mesh_v = MatrixXF::Zero(8, 3);
-    viewer_data_mass_spring.mesh_f.resize(4, 3);
-    viewer_data_mass_spring.mesh_c = MatrixXF::Zero(4, 3);
-    F a = 0.02;
-    viewer_data_mass_spring.mesh_v.row(0).head(2) = model.endpoint0 + Vector2F(-a, -a);
-    viewer_data_mass_spring.mesh_v.row(1).head(2) = model.endpoint0 + Vector2F(a, -a);
-    viewer_data_mass_spring.mesh_v.row(2).head(2) = model.endpoint0 + Vector2F(a, a);
-    viewer_data_mass_spring.mesh_v.row(3).head(2) = model.endpoint0 + Vector2F(-a, a);
-    viewer_data_mass_spring.mesh_v.row(4).head(2) = model.endpoint1 + Vector2F(-a, -a);
-    viewer_data_mass_spring.mesh_v.row(5).head(2) = model.endpoint1 + Vector2F(a, -a);
-    viewer_data_mass_spring.mesh_v.row(6).head(2) = model.endpoint1 + Vector2F(a, a);
-    viewer_data_mass_spring.mesh_v.row(7).head(2) = model.endpoint1 + Vector2F(-a, a);
-    viewer_data_mass_spring.mesh_f.row(0) << 0, 1, 2;
-    viewer_data_mass_spring.mesh_f.row(1) << 0, 2, 3;
-    viewer_data_mass_spring.mesh_f.row(2) << 4, 5, 6;
-    viewer_data_mass_spring.mesh_f.row(3) << 4, 6, 7;
-
-    /// Render free-floating midpoint as point cloud.
-    viewer_data_mass_spring.points = Vector3F(model.y(0), model.y(1), 0).transpose();
-    viewer_data_mass_spring.points_c = Vector3F(1, 0, 0).transpose();
-
-    /// Render springs as lines.
-    viewer_data_mass_spring.lines_v = MatrixXF::Zero(3, 3);
-    viewer_data_mass_spring.lines_e.resize(2, 2);
-    viewer_data_mass_spring.lines_c = MatrixXF::Zero(2, 3);
-    viewer_data_mass_spring.lines_v.row(0).head(2) = model.endpoint0;
-    viewer_data_mass_spring.lines_v.row(1).head(2) = model.y;
-    viewer_data_mass_spring.lines_v.row(2).head(2) = model.endpoint1;
-    viewer_data_mass_spring.lines_e.row(0) << 0, 1;
-    viewer_data_mass_spring.lines_e.row(1) << 1, 2;
-
-    /// Copy camera state.
-    viewer_camera = app_camera;
+    CRLViewerData& particleViewerData = viewer_data.back();
+    
+    // Clear any existing mesh data.
+    particleViewerData.mesh_v.resize(0, 3);
+    particleViewerData.mesh_f.resize(0, 3);
+    
+    // Variables to keep track of global indices.
+    int vertexOffset = 0;
+    
+    int numSegments = 32;
+    
+    for (size_t i = 0; i < sim.particles2D.size(); i++) {
+        const Particle2D& p = sim.particles2D[i];
+        
+        // Create disk mesh for this particle.
+        std::vector<Vector3F> diskVertices;
+        std::vector<Vector3I> diskFaces;
+        Vector3F center = p.pos;
+        F radius = p.radius;
+        
+        // Center vertex.
+        diskVertices.push_back(center);
+        
+        // Perimeter vertices.
+        for (int j = 0; j < numSegments; j++) {
+            F theta = 2.0 * M_PI * j / numSegments;
+            diskVertices.push_back(center + Vector3F(radius * cos(theta), radius * sin(theta), 0.0));
+        }
+        
+        // Create faces using triangle fan.
+        for (int j = 1; j < numSegments; j++) {
+            diskFaces.push_back(Vector3I(0, j, j + 1));
+        }
+        diskFaces.push_back(Vector3I(0, numSegments, 1));
+        
+        // Append diskVertices into the global mesh.
+        for (const auto& v : diskVertices) {
+            particleViewerData.mesh_v.conservativeResize(particleViewerData.mesh_v.rows() + 1, 3);
+            particleViewerData.mesh_v.row(particleViewerData.mesh_v.rows() - 1) = v.transpose();
+        }
+        
+        // Append diskFaces into the global face array.
+        for (const auto& f : diskFaces) {
+            particleViewerData.mesh_f.conservativeResize(particleViewerData.mesh_f.rows() + 1, 3);
+            // Adjust face indices by vertexOffset.
+            particleViewerData.mesh_f.row(particleViewerData.mesh_f.rows() - 1) = (f.array() + vertexOffset).matrix().transpose();
+        }
+        
+        // Update the vertex offset.
+        vertexOffset += diskVertices.size();
+    }
+    
+    // Optionally set a color for the particle disks.
+    // For example, you could fill particleViewerData.mesh_c with a uniform color.
+    particleViewerData.mesh_c = MatrixXF::Ones(particleViewerData.mesh_f.rows(), 3); // white color
 }
 
 bool TemplateApp::callbackKeyPressed(const CRLControlState& control_state, int key) {
@@ -164,3 +232,6 @@ bool TemplateApp::callbackKeyPressed(const CRLControlState& control_state, int k
     }
     return false;
 }
+
+
+

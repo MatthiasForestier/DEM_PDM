@@ -79,6 +79,9 @@ class CRLSubApp {
     /// Construct ImGui analysis window on right of screen.
     virtual void makeAnalysisWindow() {}
 
+    /// Construct ImGui Run and Check window on right of screen.
+    virtual void makeRunCheckWindow() {}
+
     /// Control action callbacks return true if default UI behaviour should remain.
     virtual bool callbackKeyPressed(const CRLControlState &control_state, int key) { return true; }
 

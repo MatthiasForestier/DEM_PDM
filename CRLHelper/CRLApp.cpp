@@ -183,12 +183,12 @@ void CRLApp::launch() {
         subApp()->makeConfigWindow();
         ImGui::End();
 
-        /// Additional "Analysis" window on right, content provided by SubApp.
+        /// Additional "Run&Check" window on right, content provided by SubApp.
         ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.75, 0), ImGuiCond_Once);
         ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.25, ImGui::GetIO().DisplaySize.y),
                                  ImGuiCond_Once);
-        ImGui::Begin("Analysis");
-        subApp()->makeAnalysisWindow();
+        ImGui::Begin("Run&Check");
+        subApp()->makeRunCheckWindow();
         ImGui::End();
 
         /// Handle mouse and keyboard controls.
