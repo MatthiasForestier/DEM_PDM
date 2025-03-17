@@ -6,24 +6,10 @@
 
 #include <iostream>
 #include <random>   
+#include <cmath>
+#include <algorithm>
+#include <unordered_set>
 
-void MassSpring::makeConfigMenu() {
-    ImGui::InputDouble("Rest Length", &rest_length, 0.05, 0.25, "%.4f");
-
-    ImGui::Text("Endpoints:");
-
-    ImGui::SetNextItemWidth(150);
-    ImGui::InputDouble("##x0", &endpoint0(0), 0.05, 0.25, "%.4f");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(150);
-    ImGui::InputDouble("##y0", &endpoint0(1), 0.05, 0.25, "%.4f");
-
-    ImGui::SetNextItemWidth(150);
-    ImGui::InputDouble("##x1", &endpoint1(0), 0.05, 0.25, "%.4f");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(150);
-    ImGui::InputDouble("##y1", &endpoint1(1), 0.05, 0.25, "%.4f");
-}
 
 void Simulation::makeConfigMenu() {
     // World parameters
@@ -39,20 +25,21 @@ void Simulation::makeConfigMenu() {
     ImGui::InputDouble("Mean", &mean, 0.01, 0.05, "%.2f");
     ImGui::InputDouble("Standard Deviation", &std, 0.01, 0.05, "%.2f");
     ImGui::InputDouble("Density", &density, 10.0, 100.0, "%.2f");
-    ImGui::InputDouble("Contact Bond Normal Stiffness", &contactBondNormalStiffness, 1.0, 5.0, "%.2f");
-    ImGui::InputDouble("Contact Stiffness Ratio", &contactStiffnessRatio, 0.01, 0.05, "%.2f");
-    ImGui::InputDouble("Interparticle Friction", &interparticleFriction, 0.01, 0.05, "%.2f");
-    ImGui::InputDouble("Contact Bond Normal Strength", &contactBondNormalStrength, 1.0, 5.0, "%.2f");
-    ImGui::InputDouble("Contact Bond Shear Strength", &contactBondShearStrength, 1.0, 5.0, "%.2f");
-    ImGui::InputDouble("Particle Wall Contact Normal Stiffness", &particleWallContactNormalStiffness, 1.0, 5.0, "%.2f");
-    ImGui::InputDouble("Particle Wall Contact Tangential Stiffness", &particleWallContactTangentialStiffness, 1.0, 5.0, "%.2f");
-    ImGui::InputDouble("Particle Wall Friction", &particleWallFriction, 0.01, 0.05, "%.2f");
-    ImGui::InputDouble("Translational Damping", &translationalDamping, 0.01, 0.05, "%.2f");
-    ImGui::InputDouble("Rotational Damping", &rotationalDamping, 0.01, 0.05, "%.2f");
-    ImGui::InputDouble("Young's Modulus Min", &youngsModulusMin, 1e9, 1e10, "%.2e");
-    ImGui::InputDouble("Young's Modulus Max", &youngsModulusMax, 1e9, 1e10, "%.2e");
-    ImGui::InputDouble("Loading Velocity", &loadingVelocity, 0.01, 0.05, "%.2f");
-
+    ImGui::InputDouble("Boundary Overlap", &overlapParam, 10.0, 100.0, "%.2f");
+    ImGui::InputDouble("Interaction Overlap", &interactionParam, 10.0, 100.0, "%.2f");
+    // ImGui::InputDouble("Contact Bond Normal Stiffness", &contactBondNormalStiffness, 1.0, 5.0, "%.2f");
+    // ImGui::InputDouble("Contact Stiffness Ratio", &contactStiffnessRatio, 0.01, 0.05, "%.2f");
+    // ImGui::InputDouble("Interparticle Friction", &interparticleFriction, 0.01, 0.05, "%.2f");
+    // ImGui::InputDouble("Contact Bond Normal Strength", &contactBondNormalStrength, 1.0, 5.0, "%.2f");
+    // ImGui::InputDouble("Contact Bond Shear Strength", &contactBondShearStrength, 1.0, 5.0, "%.2f");
+    // ImGui::InputDouble("Particle Wall Contact Normal Stiffness", &particleWallContactNormalStiffness, 1.0, 5.0, "%.2f");
+    // ImGui::InputDouble("Particle Wall Contact Tangential Stiffness", &particleWallContactTangentialStiffness, 1.0, 5.0, "%.2f");
+    // ImGui::InputDouble("Particle Wall Friction", &particleWallFriction, 0.01, 0.05, "%.2f");
+    // ImGui::InputDouble("Translational Damping", &translationalDamping, 0.01, 0.05, "%.2f");
+    // ImGui::InputDouble("Rotational Damping", &rotationalDamping, 0.01, 0.05, "%.2f");
+    // ImGui::InputDouble("Young's Modulus Min", &youngsModulusMin, 1e9, 1e10, "%.2e");
+    // ImGui::InputDouble("Young's Modulus Max", &youngsModulusMax, 1e9, 1e10, "%.2e");
+    // ImGui::InputDouble("Loading Velocity", &loadingVelocity, 0.01, 0.05, "%.2f");
 
     // Static labels for display.
     static const std::vector<const char*> poissonChoiceLabels = {"0.05", "0.15", "0.25", "0.35", "0.45"};
@@ -67,7 +54,9 @@ void Simulation::makeConfigMenu() {
     }
 
     // Create a single combo box for Poisson Ratio.
-    if (ImGui::Combo("Poisson Ratio", &currentIndex, poissonChoiceLabels.data(), static_cast<int>(poissonChoices.size()))) {
+    if (ImGui::Combo("Poisson Ratio", &currentIndex,
+                     poissonChoiceLabels.data(),
+                     static_cast<int>(poissonChoices.size()))) {
         // Update the simulation's poissonRatio based on the selected index.
         poissonRatio = poissonChoices(currentIndex);
     }
@@ -76,183 +65,526 @@ void Simulation::makeConfigMenu() {
         // Here you would call your particle creation function.
         // For example, if you have a function createRandomParticles2D() accessible from this context:
         particles2D = createRandomParticles2D();
+        insertParticlesIntoGrid();
     }
 
+    // --- New UI for Scenario Objects ---
+
+    // Toggle flag for activation.
+    static bool activateScenario = false;
+    static bool lastFrameToggleState = false;
+
+    // Provide a few shape choices.
+    static int shapeIndex = 0;
+    const char* shapes[] = {"Circle", "Square"};
+
+    // ImGui Checkbox for toggling on/off.
+    if (ImGui::Checkbox("Activate Scenario Object", &activateScenario)) {
+        // If the user has just toggled OFF, remove the scenario object(s) from the simulation.
+        if (!activateScenario && lastFrameToggleState) {
+            scenarioObjects.clear();
+            std::cout << "Scenario object(s) removed from simulation.\n";
+        }
+        lastFrameToggleState = activateScenario;
+    }
+
+    // If activated, show a combo for shape selection + create button.
+    if (activateScenario) {
+        ImGui::Combo("Shape Choice", &shapeIndex, shapes, IM_ARRAYSIZE(shapes));
+        
+        if (ImGui::Button("Create Scenario")) {
+            // Clear any previously stored scenario objects.
+            scenarioObjects.clear();
+            
+            if (shapeIndex == 0) {
+                // Create a Circle scenario object with 64 segments, radius 1.1, centered at the origin.
+                scenarioObjects.push_back(std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f)));
+            } else {
+                // Create a Square scenario object with half-dimensions 1.1 and 0.9, centered at the origin.
+                scenarioObjects.push_back(std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f)));
+            }
+            buildGridDataStructure();
+            insertParticlesIntoGrid();
+            std::cout << "New scenario object created and stored!\n";
+        }
+    }
 }
 
+void Simulation::buildGridDataStructure() 
+{
+    if (scenarioObjects.empty()) {
+    std::cerr << "No scenario objects defined in simulation.\n";
+    return;
+    }
+    // Use the cached bounding box (BB) from the first scenario object.
+    const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
+    ;
+    minX = bbox.min_x;
+    maxX = bbox.max_x;
+    minY = bbox.min_y;
+    maxY = bbox.max_y;
 
-void MassSpring::compute_energy(F& value) const {
-    VectorXF inputs(6);
-    inputs << y, endpoint0, endpoint1;
+    // Compute the number of cells along each axis.
+    numCellsX = static_cast<int>(std::ceil((maxX - minX) / cellSize));
+    numCellsY = static_cast<int>(std::ceil((maxY - minY) / cellSize));
 
-    // clang-format off
-    F y0 = inputs[0];
-    F y1 = inputs[1];
-    F e00 = inputs[2];
-    F e01 = inputs[3];
-    F e10 = inputs[4];
-    F e11 = inputs[5];
-
-    F t2 = pow(y0 - e00, 0.2e1);
-    F t4 = pow(y1 - e01, 0.2e1);
-    F t6 = sqrt(t2 + t4);
-    F t8 = pow(t6 - rest_length, 0.2e1);
-    F t10 = pow(y0 - e10, 0.2e1);
-    F t12 = pow(y1 - e11, 0.2e1);
-    F t14 = sqrt(t10 + t12);
-    F t16 = pow(t14 - rest_length, 0.2e1);
-
-    value = t8 / 0.2e1 + t16 / 0.2e1;
-    // clang-format on
+    // Resize the grid vector to hold all cells.
+    grid.clear();
+    grid.resize(numCellsX * numCellsY);
 }
 
-void MassSpring::compute_gradient(VectorXF& gradient) const {
-    VectorXF inputs(6);
-    inputs << y, endpoint0, endpoint1;
+// Updated: Insert Particle2D objects into the grid.
+// Now each particle is inserted into all cells that its circle overlaps.
+void Simulation::insertParticlesIntoGrid()
+{
+    // Clear any previous data in the grid.
+    for (auto &cell : grid) {
+        cell.clear();
+    }
 
-    // clang-format off
-    F y0 = inputs[0];
-    F y1 = inputs[1];
-    F e00 = inputs[2];
-    F e01 = inputs[3];
-    F e10 = inputs[4];
-    F e11 = inputs[5];
+    // Loop over all Particle2D objects.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        const Particle2D &p = particles2D[i];
 
-    F t1 = y0 - e00;
-    F t2 = t1 * t1;
-    F t3 = y1 - e01;
-    F t4 = t3 * t3;
-    F t6 = sqrt(t2 + t4);
-    F t9 = 0.1e1 / t6 * (t6 - rest_length);
-    F t11 = y0 - e10;
-    F t12 = t11 * t11;
-    F t13 = y1 - e11;
-    F t14 = t13 * t13;
-    F t16 = sqrt(t12 + t14);
-    F t19 = 0.1e1 / t16 * (t16 - rest_length);
+        // Compute the extent of the particle (its bounding box).
+        F xMinParticle = p.pos(0) - p.radius;
+        F xMaxParticle = p.pos(0) + p.radius;
+        F yMinParticle = p.pos(1) - p.radius;
+        F yMaxParticle = p.pos(1) + p.radius;
 
-    F unknown[6];
+        // Compute the grid cell range that covers this bounding box.
+        int minCellX = static_cast<int>(std::floor((xMinParticle - minX) / cellSize));
+        int maxCellX = static_cast<int>(std::floor((xMaxParticle - minX) / cellSize));
+        int minCellY = static_cast<int>(std::floor((yMinParticle - minY) / cellSize));
+        int maxCellY = static_cast<int>(std::floor((yMaxParticle - minY) / cellSize));
 
-    unknown[0] = t1 * t9 + t11 * t19;
-    unknown[1] = t13 * t19 + t3 * t9;
-    unknown[2] = -t1 * t9;
-    unknown[3] = -t3 * t9;
-    unknown[4] = -t11 * t19;
-    unknown[5] = -t13 * t19;
+        // Clamp indices to grid bounds.
+        minCellX = std::max(minCellX, 0);
+        maxCellX = std::min(maxCellX, numCellsX - 1);
+        minCellY = std::max(minCellY, 0);
+        maxCellY = std::min(maxCellY, numCellsY - 1);
 
-    VectorXF gradient_full;
-    processMapleOutput(reinterpret_cast<F *>(unknown), gradient_full, 6, 1);
-    gradient = gradient_full.segment(0, 2);
-    // clang-format on
+        // Insert the particle into each overlapping cell.
+        for (int cx = minCellX; cx <= maxCellX; cx++) {
+            for (int cy = minCellY; cy <= maxCellY; cy++) {
+                int index = cy * numCellsX + cx;
+                grid[index].push_back(static_cast<int>(i));
+            }
+        }
+    }
 }
 
-void MassSpring::compute_hessian(SparseMatrixF& hessian) const {
-    VectorXF inputs(6);
-    inputs << y, endpoint0, endpoint1;
+void Simulation::updateNeighborLists()
+{
+    // Clear neighbor lists for all particles.
+    for (auto &p : particles2D) {
+        p.neighborIndices.clear();
+    }
 
-    // clang-format off
-    F y0 = inputs[0];
-    F y1 = inputs[1];
-    F e00 = inputs[2];
-    F e01 = inputs[3];
-    F e10 = inputs[4];
-    F e11 = inputs[5];
+    // Loop over each particle.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        Particle2D &p = particles2D[i];
 
-    F t1 = y0 - e00;
-    F t2 = t1 * t1;
-    F t3 = y1 - e01;
-    F t4 = t3 * t3;
-    F t5 = t2 + t4;
-    F t6 = 0.1e1 / t5;
-    F t7 = 0.4e1 * t1 * t1;
-    F t9 = t7 * t6 / 0.4e1;
-    F t10 = sqrt(t5);
-    F t11 = t10 - rest_length;
-    F t14 = 0.1e1 / t10 / t5 * t11;
-    F t16 = t7 * t14 / 0.4e1;
-    F t18 = 0.1e1 / t10 * t11;
-    F t19 = y0 - e10;
-    F t20 = t19 * t19;
-    F t21 = y1 - e11;
-    F t22 = t21 * t21;
-    F t23 = t20 + t22;
-    F t24 = 0.1e1 / t23;
-    F t25 = 0.4e1 * t19 * t19;
-    F t27 = t25 * t24 / 0.4e1;
-    F t28 = sqrt(t23);
-    F t29 = t28 - rest_length;
-    F t32 = 0.1e1 / t28 / t23 * t29;
-    F t34 = t25 * t32 / 0.4e1;
-    F t36 = 0.1e1 / t28 * t29;
-    F t41 = 0.4e1 * t3 * t1 * t14;
-    F t45 = 0.4e1 * t21 * t19 * t32;
-    F t46 = 0.4e1 * t1 * t3 * t6 + 0.4e1 * t19 * t21 * t24 - t41 - t45;
-    F t47 = -0.2e1 * t1 * t6;
-    F t53 = t1 * t47 / 0.2e1 + t1 * t1 * t14 - t18;
-    F t54 = -0.2e1 * t3 * t6;
-    F t57 = -0.4e1 * t3 * t1 * t14;
-    F t58 = 0.2e1 * t1 * t54 - t57;
-    F t59 = -0.2e1 * t19 * t24;
-    F t65 = t19 * t59 / 0.2e1 + t19 * t19 * t32 - t36;
-    F t66 = -0.2e1 * t21 * t24;
-    F t69 = -0.4e1 * t21 * t19 * t32;
-    F t70 = 0.2e1 * t19 * t66 - t69;
-    F t71 = 0.4e1 * t3 * t3;
-    F t73 = t71 * t6 / 0.4e1;
-    F t75 = t71 * t14 / 0.4e1;
-    F t76 = 0.4e1 * t21 * t21;
-    F t78 = t76 * t24 / 0.4e1;
-    F t80 = t76 * t32 / 0.4e1;
-    F t83 = 0.2e1 * t3 * t47 - t57;
-    F t89 = t3 * t54 / 0.2e1 + t3 * t3 * t14 - t18;
-    F t91 = 0.2e1 * t21 * t59 - t69;
-    F t97 = t21 * t66 / 0.2e1 + t21 * t21 * t32 - t36;
-    F t100 = -0.2e1 * t1 * t54 - t41;
-    F t104 = -0.2e1 * t19 * t66 - t45;
+        // Compute the bounding cell range for particle p (using its full circle).
+        int minCellX = static_cast<int>(std::floor((p.pos(0) - p.radius - minX) / cellSize));
+        int maxCellX = static_cast<int>(std::floor((p.pos(0) + p.radius - minX) / cellSize));
+        int minCellY = static_cast<int>(std::floor((p.pos(1) - p.radius - minY) / cellSize));
+        int maxCellY = static_cast<int>(std::floor((p.pos(1) + p.radius - minY) / cellSize));
 
-    F unknown[6][6];
+        // Clamp indices.
+        minCellX = std::max(minCellX, 0);
+        maxCellX = std::min(maxCellX, numCellsX - 1);
+        minCellY = std::max(minCellY, 0);
+        maxCellY = std::min(maxCellY, numCellsY - 1);
 
-    unknown[0][0] = t9 - t16 + t18 + t27 - t34 + t36;
-    unknown[0][1] = t46 / 0.4e1;
-    unknown[0][2] = t53;
-    unknown[0][3] = t58 / 0.4e1;
-    unknown[0][4] = t65;
-    unknown[0][5] = t70 / 0.4e1;
-    unknown[1][0] = t46 / 0.4e1;
-    unknown[1][1] = t73 - t75 + t18 + t78 - t80 + t36;
-    unknown[1][2] = t83 / 0.4e1;
-    unknown[1][3] = t89;
-    unknown[1][4] = t91 / 0.4e1;
-    unknown[1][5] = t97;
-    unknown[2][0] = t53;
-    unknown[2][1] = t83 / 0.4e1;
-    unknown[2][2] = t9 - t16 + t18;
-    unknown[2][3] = t100 / 0.4e1;
-    unknown[2][4] = 0.0e0;
-    unknown[2][5] = 0.0e0;
-    unknown[3][0] = t58 / 0.4e1;
-    unknown[3][1] = t89;
-    unknown[3][2] = t100 / 0.4e1;
-    unknown[3][3] = t73 - t75 + t18;
-    unknown[3][4] = 0.0e0;
-    unknown[3][5] = 0.0e0;
-    unknown[4][0] = t65;
-    unknown[4][1] = t91 / 0.4e1;
-    unknown[4][2] = 0.0e0;
-    unknown[4][3] = 0.0e0;
-    unknown[4][4] = t27 - t34 + t36;
-    unknown[4][5] = t104 / 0.4e1;
-    unknown[5][0] = t70 / 0.4e1;
-    unknown[5][1] = t97;
-    unknown[5][2] = 0.0e0;
-    unknown[5][3] = 0.0e0;
-    unknown[5][4] = t104 / 0.4e1;
-    unknown[5][5] = t78 - t80 + t36;
+        // Use a set to avoid duplicate candidate neighbors.
+        std::unordered_set<int> neighborCandidates;
+        for (int cx = minCellX; cx <= maxCellX; cx++) {
+            for (int cy = minCellY; cy <= maxCellY; cy++) {
+                int gridIndex = cy * numCellsX + cx;
+                for (int j : grid[gridIndex]) {
+                    if (j != static_cast<int>(i)) { // avoid self
+                        neighborCandidates.insert(j);
+                    }
+                }
+            }
+        }
 
-    MatrixXF hessian_dense;
-    processMapleOutput(reinterpret_cast<F *>(unknown), hessian_dense, 6, 6);
-    hessian = hessian_dense.block(0, 0, 2, 2).sparseView();
-    // clang-format on
+        // Check for actual overlap with each candidate.
+        for (int j : neighborCandidates) {
+            // To avoid duplicate symmetric entries, you can choose to only add if j > i.
+            if (j <= static_cast<int>(i)) continue;
+            const Particle2D &q = particles2D[j];
+            F dx = p.pos(0) - q.pos(0);
+            F dy = p.pos(1) - q.pos(1);
+            F distance = std::sqrt(dx * dx + dy * dy);
+            if (distance < (p.radius + q.radius)) {
+                p.neighborIndices.push_back(j);
+            }
+        }
+    }
+}
+
+void Simulation::updateGlobalPositions() {
+    int n = 0;
+    if (use3D) {
+        n = static_cast<int>(particles3D.size());
+        globalPositions.resize(6 * n);
+        for (int i = 0; i < n; i++) {
+            globalPositions.segment<6>(6*i) = particles3D[i].pos;
+        }
+    }else{
+        n = static_cast<int>(particles2D.size());
+        globalPositions.resize(3 * n);
+        for (int i = 0; i < n; i++) {
+            globalPositions.segment<3>(3*i) = particles2D[i].pos;
+        }
+    }
+}
+
+// Similarly, when updating particles from the global state:
+void Simulation::applyGlobalPositions(const VectorXF &positions) {
+    if (use3D) {
+        int n = static_cast<int>(particles3D.size());
+        for (int i = 0; i < n; i++) {
+            particles3D[i].pos = positions.segment<6>(6*i);
+        }
+    } else {
+        int n = static_cast<int>(particles2D.size());
+        for (int i = 0; i < n; i++) {
+            particles2D[i].pos = positions.segment<3>(3*i);
+        }
+    }
+}
+
+VectorXF Simulation::getGlobalState() {
+    updateGlobalPositions();
+    return globalPositions;
+}
+
+void Simulation::setGlobalState(const VectorXF &state) {
+    globalPositions = state;
+    applyGlobalPositions(globalPositions);
+}
+
+void Simulation::updateAuxiliaryStructures() {
+    // Build the grid and update neighbor lists based on the current particle positions.
+    insertParticlesIntoGrid();
+    updateNeighborLists();
+}
+
+void Simulation::compute_energy(F &value) const {
+    value = 0;
+    // First, add gravitational and boundary collision energy contributions.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        // Copy particle so that detectBoundaryCollision2D can update its state.
+        Particle2D p = particles2D[i];
+        detectBoundaryCollision2D(p);
+
+        // Gravitational potential energy: m * g * y.
+        value += gravity(1) * p.pos(1); //p.mass *
+
+        // Energy contributions due to boundary collisions.
+        if (p.BoundaryCollision == 1) {
+            for (const auto &so : scenarioObjects) {
+                if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
+                    F px = p.pos(0);
+                    F py = p.pos(1);
+                    F radius = p.radius;
+                    F Rb = circle->radius;
+                    F so_x = so->position(0);
+                    F so_y = so->position(1);
+                    // Distance between particle and circle center.
+                    F dx = px - so_x;
+                    F dy = py - so_y;
+                    F dist = std::sqrt(dx * dx + dy * dy);
+                    // Penetration offset (here simplified as the particle radius minus the circle radius)
+                    F delta = radius - Rb;
+                    // Penalty energy contribution.
+                    value += 0.5 * overlapParam * (dist + delta) * (dist + delta);
+                }
+            }
+        } else if (p.BoundaryCollision == 2) {
+            for (const auto &so : scenarioObjects) {
+                if (Square* square = dynamic_cast<Square*>(so.get())) {
+                    F px = p.pos(0);
+                    F py = p.pos(1);
+                    F radius = p.radius;
+
+                    F min_x = square->min_x;
+                    F max_x = square->max_x;
+                    F min_y = square->min_y;
+                    F max_y = square->max_y;
+
+                    F overlap_x_r = 0, overlap_x_l = 0;
+                    if (px - radius < min_x) {
+                        overlap_x_l = min_x - (px - radius);
+                    } else if (px + radius > max_x) {
+                        overlap_x_r = (px + radius) - max_x;
+                    }
+                    F overlap_y_b = 0, overlap_y_t = 0;
+                    if (py - radius < min_y) {
+                        overlap_y_b = min_y - (py - radius);
+                    } else if (py + radius > max_y) {
+                        overlap_y_t = (py + radius) - max_y;
+                    }
+                    // Total overlap computed as the Euclidean norm of the directional overlaps.
+                    F total_overlap = std::sqrt(overlap_x_l * overlap_x_l +
+                                                overlap_y_t * overlap_y_t +
+                                                overlap_x_r * overlap_x_r +
+                                                overlap_y_b * overlap_y_b);
+                    if (total_overlap > 0) {
+                        value += 0.5 * overlapParam * total_overlap * total_overlap;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Interparticle overlap energy ---
+    // Loop over each particle and its neighbor list.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        const Particle2D &p = particles2D[i];
+        for (int j : p.neighborIndices) {
+            // Each neighbor index j is guaranteed to be > i (avoid duplicate work).
+            const Particle2D &q = particles2D[j];
+            F dx = p.pos(0) - q.pos(0);
+            F dy = p.pos(1) - q.pos(1);
+            F d = std::sqrt(dx * dx + dy * dy);
+            // Compute overlap only if particles are close.
+            F overlap = (p.radius + q.radius) - d;
+            if (overlap > 0) {
+                value += 0.5 * interactionParam * overlap * overlap;
+            }
+        }
+    }
+}
+
+void Simulation::compute_gradient(VectorXF &gradient) const {
+    // Global state has 3 entries per particle: [x, y, theta]
+    gradient.resize(3 * particles2D.size());
+    gradient.setZero();
+
+    // First, add gravitational and boundary collision gradient contributions.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        Particle2D p = particles2D[i];
+        detectBoundaryCollision2D(p);
+
+        // Gravitational gradient: only affects the y-component.
+        gradient(3 * i)     = 0;
+        gradient(3 * i + 1) = gravity(1); //p.mass *
+        gradient(3 * i + 2) = 0;
+
+        if (p.BoundaryCollision == 1) {
+            for (const auto &so : scenarioObjects) {
+                if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
+                    F px = p.pos(0);
+                    F py = p.pos(1);
+                    F boundaryRadius = circle->radius;
+                    F so_x = so->position(0);
+                    F so_y = so->position(1);
+                    
+                    // Penetration depth.
+                    F penetration = (p.radius - boundaryRadius);
+                    F stiffness = overlapParam;
+                    
+                    F dx = px - so_x;
+                    F dy = py - so_y;
+                    F dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist == 0) continue;
+                    // The gradient contribution (simplified).
+                    F factor = stiffness * penetration / dist;
+                    gradient(3 * i)     += dx * factor + dx * stiffness;
+                    gradient(3 * i + 1) += dy * factor + dy * stiffness;
+                }
+            }
+        } else if (p.BoundaryCollision == 2) {
+            for (const auto &so : scenarioObjects) {
+                if (Square* square = dynamic_cast<Square*>(so.get())) {
+                    F px = p.pos(0);
+                    F py = p.pos(1);
+                    F radius = p.radius;
+
+                    F min_x = square->min_x;
+                    F max_x = square->max_x;
+                    F min_y = square->min_y;
+                    F max_y = square->max_y;
+
+                    F overlap_x_r = 0, overlap_x_l = 0;
+                    if (px - radius < min_x) {
+                        overlap_x_l = min_x - (px - radius);
+                    } else if (px + radius > max_x) {
+                        overlap_x_r = (px + radius) - max_x;
+                    }
+                    F overlap_y_b = 0, overlap_y_t = 0;
+                    if (py - radius < min_y) {
+                        overlap_y_b = min_y - (py - radius);
+                    } else if (py + radius > max_y) {
+                        overlap_y_t = (py + radius) - max_y;
+                    }
+                    F total_overlap = std::sqrt(overlap_x_l * overlap_x_l +
+                                                overlap_y_t * overlap_y_t +
+                                                overlap_x_r * overlap_x_r +
+                                                overlap_y_b * overlap_y_b);
+                    if (total_overlap > 0) {
+                        if (overlap_x_l > 0) {
+                            gradient(3 * i) += overlapParam * (-min_x + px - radius);
+                        } else if (overlap_x_r > 0) {
+                            gradient(3 * i) += overlapParam * (px - max_x + radius);
+                        }
+                        if (overlap_y_b > 0) {
+                            gradient(3 * i + 1) += overlapParam * (-min_y + py - radius);
+                        } else if (overlap_y_t > 0) {
+                            gradient(3 * i + 1) +=  overlapParam * (py - max_y + radius);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Interparticle gradient contributions ---
+    // Loop over each particle and its neighbor list.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        const Particle2D &p = particles2D[i];
+        for (int j : p.neighborIndices) {
+            const Particle2D &q = particles2D[j];
+            F dx = p.pos(0) - q.pos(0);
+            F dy = p.pos(1) - q.pos(1);
+            F d = std::sqrt(dx * dx + dy * dy);
+            const F eps = 1e-6; // or another appropriate threshold
+            if (d < eps) continue; // avoid division by zero
+            F overlap = (p.radius + q.radius) - d;
+            if (overlap > 0) {
+                // Gradient contribution: ∇E = -k_overlap * Δ * ( (dx, dy)/d ).
+                F factor = interactionParam * overlap / d;
+                // Update gradient for particle i.
+                gradient(3 * i)     += -factor * dx;
+                gradient(3 * i + 1) += -factor * dy;
+                // Update gradient for particle j (opposite sign).
+                gradient(3 * j)     += factor * dx;
+                gradient(3 * j + 1) += factor * dy;
+            }
+        }
+    }
+}
+
+void Simulation::compute_hessian(SparseMatrixF &hessian) const {
+    int n = 3 * particles2D.size();
+    hessian.resize(n, n);
+    hessian.setZero();
+
+    // Boundary collision Hessian contributions (existing code remains unchanged).
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        Particle2D p = particles2D[i];
+        detectBoundaryCollision2D(p);
+        if (p.BoundaryCollision == 1) {
+            for (const auto &so : scenarioObjects) {
+                if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
+                    F px = p.pos(0), py = p.pos(1);
+                    F boundaryRadius = circle->radius;
+                    F so_x = so->position(0), so_y = so->position(1);
+                    F t3 = (p.radius - boundaryRadius) * overlapParam;
+                    F t4 = px * px;
+                    F t7 = py * py;
+                    F t10 = so_x * so_x;
+                    F t11 = so_y * so_y;
+                    F t12 = t4 - 2.0 * px * so_x + t7 - 2.0 * py * so_y + t10 + t11;
+                    F t13 = std::sqrt(t12);
+                    F t15 = 1.0 / (t13 * t12);
+                    F t18 = 2.0 * px - 2.0 * so_x;
+                    F t19 = t18 * t18;
+                    F t24 = (1.0 / t13) * t3;
+                    F t25 = overlapParam;
+                    F t30 = 2.0 * py - 2.0 * so_y;
+                    F t33 = (t30 * t18 * t15 * t3) / 4.0;
+                    F t34 = t30 * t30;
+
+                    hessian.coeffRef(3 * i, 3 * i)       = -t19 * t15 * t3 / 4.0 + t24 + t25; // 4.0 
+                    hessian.coeffRef(3 * i, 3 * i + 1)   = -t33;
+                    hessian.coeffRef(3 * i, 3 * i + 2)   = 0.0;
+                    hessian.coeffRef(3 * i + 1, 3 * i)   = -t33;
+                    hessian.coeffRef(3 * i + 1, 3 * i + 1) = -t34 * t15 * t3 / 4.0  + t24 + t25; // 4.0 
+                    hessian.coeffRef(3 * i + 1, 3 * i + 2) = 0.0;
+                    hessian.coeffRef(3 * i + 2, 3 * i)   = 0.0;
+                    hessian.coeffRef(3 * i + 2, 3 * i + 1) = 0.0;
+                    hessian.coeffRef(3 * i + 2, 3 * i + 2) = 0.0;
+                }
+            }
+        } else if (p.BoundaryCollision == 2) {
+            for (const auto &so : scenarioObjects) {
+                if (Square* square = dynamic_cast<Square*>(so.get())) {
+                    F px = p.pos(0), py = p.pos(1);
+                    F min_x = square->min_x, max_x = square->max_x;
+                    F min_y = square->min_y, max_y = square->max_y;
+                    F overlap_x_r = 0, overlap_x_l = 0;
+                    if (px - p.radius < min_x) {
+                        overlap_x_l = min_x - (px - p.radius);
+                    } else if (px + p.radius > max_x) {
+                        overlap_x_r = (px + p.radius) - max_x;
+                    }
+                    F overlap_y_b = 0, overlap_y_t = 0;
+                    if (py - p.radius < min_y) {
+                        overlap_y_b = min_y - (py - p.radius);
+                    } else if (py + p.radius > max_y) {
+                        overlap_y_t = (py + p.radius) - max_y;
+                    }
+                    F total_overlap = std::sqrt(overlap_x_l * overlap_x_l +
+                                               overlap_y_t * overlap_y_t +
+                                               overlap_x_r * overlap_x_r +
+                                               overlap_y_b * overlap_y_b);
+                    F t1 = overlapParam;
+                    if (total_overlap > 0) {
+                        if (overlap_x_l > 0 || overlap_x_r > 0){
+                            hessian.coeffRef(3 * i, 3 * i)       = t1;
+                        }
+                        hessian.coeffRef(3 * i, 3 * i + 1)   = 0.0;
+                        hessian.coeffRef(3 * i, 3 * i + 2)   = 0.0;
+                        hessian.coeffRef(3 * i + 1, 3 * i)   = 0.0;
+                        if (overlap_y_t > 0 || overlap_y_b > 0){
+                            hessian.coeffRef(3 * i + 1, 3 * i + 1) = t1;
+                        }
+                        hessian.coeffRef(3 * i + 1, 3 * i + 2) = 0.0;
+                        hessian.coeffRef(3 * i + 2, 3 * i)   = 0.0;
+                        hessian.coeffRef(3 * i + 2, 3 * i + 1) = 0.0;
+                        hessian.coeffRef(3 * i + 2, 3 * i + 2) = 0.0;
+                    }
+                }
+            }
+        }
+    }
+
+    //--- Interparticle Hessian contributions ---
+    //Loop over each particle and its neighbor list.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        const Particle2D &p = particles2D[i];
+        for (int j : p.neighborIndices) {
+            const Particle2D &q = particles2D[j];
+            F dx = p.pos(0) - q.pos(0);
+            F dy = p.pos(1) - q.pos(1);
+            F d = std::sqrt(dx * dx + dy * dy);
+            const F eps = 1e-6; // or another appropriate threshold
+            if (d < eps) continue; // avoid division by zero
+            F overlap = (p.radius + q.radius) - d;
+            if (overlap > 0) {
+                // Unit vector from q to p.
+                Eigen::Vector2d u(dx / d, dy / d);
+                // Compute the 2x2 Hessian block.
+                Eigen::Matrix2d H_block = interactionParam * (u * u.transpose()) -
+                    (interactionParam * overlap / d) * (Eigen::Matrix2d::Identity() - u * u.transpose());
+
+                // Update the Hessian blocks for particles i and j (only for x and y components).
+                for (int a = 0; a < 2; a++) {
+                    for (int b = 0; b < 2; b++) {
+                        hessian.coeffRef(3 * i + a, 3 * i + b) += H_block(a, b);
+                        hessian.coeffRef(3 * j + a, 3 * j + b) += H_block(a, b);
+                        hessian.coeffRef(3 * i + a, 3 * j + b) -= H_block(a, b);
+                        hessian.coeffRef(3 * j + a, 3 * i + b) -= H_block(a, b);
+                    }
+                }
+            }
+        }
+    }
 }
 
 Particle2D::Particle2D(F radius, const Simulation& simParams)
@@ -273,7 +605,6 @@ Particle3D::Particle3D(F radius, const Simulation& sim)
     inertia = (2.0 / 5.0) * mass * radius * radius;
 }
 
-// Function to create a specified number of Particle2D objects with random positions and radii.
 std::vector<Particle2D> Simulation::createRandomParticles2D() {
     std::vector<Particle2D> particles;
     particles.reserve(numParticles);
@@ -283,7 +614,7 @@ std::vector<Particle2D> Simulation::createRandomParticles2D() {
     std::mt19937 gen(rd());
 
     // Uniform distributions for x and y coordinates within the display.
-    std::uniform_real_distribution<F> distX(-1.0, 1.0);
+    std::uniform_real_distribution<F> distX(-0.8, 0.8);
     std::uniform_real_distribution<F> distY(-0.5, 0.5);
 
     // Normal distribution for disk radii.
@@ -329,4 +660,102 @@ std::vector<Particle2D> Simulation::createRandomParticles2D() {
     }
 
     return particles;
+}
+
+void Simulation::colorParticleRed(int particleID) {
+    if (particleID < 0 || particleID >= static_cast<int>(particles2D.size())) {
+        std::cerr << "Error: Invalid particle ID: " << particleID << std::endl;
+        return;
+    }
+    // Set the particle's color to red (RGB: 1, 0, 0)
+    particles2D[particleID].color = Color(1.0f, 0.0f, 0.0f);
+}
+
+
+void Simulation::detectBoundaryCollision2D(Particle2D &p) const {
+    p.BoundaryCollision = 0;
+    // Loop over each scenario object and use the virtual function.
+    for (const auto &so : scenarioObjects) {
+        int collision = so->detectCollision(p);
+        if (collision != 0) {
+            p.BoundaryCollision = collision;
+            // Optionally break out if you only need to detect the first collision.
+            break;
+        }
+    }
+}
+
+Square::Square(F halfLength, F halfWidth, const Vector3F& pos)
+    : halfLength(halfLength), halfWidth(halfWidth)
+{
+    position = pos;
+    generateVertices();
+}
+
+void Square::generateVertices() {
+    vertices.clear();
+    // Compute bounds.
+    min_x = position(0) - halfLength;
+    max_x = position(0) + halfLength;
+    min_y = position(1) - halfWidth;
+    max_y = position(1) + halfWidth;
+    
+    // Update the cached bounding box.
+    BB.min_x = min_x;
+    BB.max_x = max_x;
+    BB.min_y = min_y;
+    BB.max_y = max_y;
+    
+    // Compute the vertices.
+    vertices.push_back(Vector3F(min_x, min_y, position(2)));
+    vertices.push_back(Vector3F(min_x, max_y, position(2)));
+    vertices.push_back(Vector3F(max_x, max_y, position(2)));
+    vertices.push_back(Vector3F(max_x, min_y, position(2)));
+}
+
+int Square::detectCollision(const Particle2D &p) const {
+    // Use the cached bounding box (BB) for collision detection.
+    if ((p.pos(0) - p.radius) < BB.min_x || (p.pos(0) + p.radius) > BB.max_x ||
+        (p.pos(1) - p.radius) < BB.min_y || (p.pos(1) + p.radius) > BB.max_y)
+    {
+        return 2; // Collision with square boundary.
+    }
+    return 0;
+}
+
+// Implementation for Circle.
+
+Circle::Circle(F radius, I numSegments, const Vector3F& pos)
+    : radius(radius), numSegments(numSegments)
+{
+    position = pos;
+    generateVertices();
+}
+
+void Circle::generateVertices() {
+    vertices.clear();
+    // Generate vertices approximating the circle.
+    for (I i = 0; i < numSegments; i++) {
+        F theta = 2.0f * F(M_PI) * F(i) / F(numSegments);
+        F x = radius * std::cos(theta);
+        F y = radius * std::sin(theta);
+        vertices.push_back(Vector3F(position(0) + x, position(1) + y, position(2)));
+    }
+    
+    // Update the bounding box for the circle.
+    BB.min_x = position(0) - radius;
+    BB.max_x = position(0) + radius;
+    BB.min_y = position(1) - radius;
+    BB.max_y = position(1) + radius;
+}
+
+int Circle::detectCollision(const Particle2D &p) const {
+    // Use the circle's center and radius to detect collision.
+    F dx = p.pos(0) - position(0);
+    F dy = p.pos(1) - position(1);
+    F distSq = dx * dx + dy * dy;
+    F limit = radius - p.radius;
+    if (distSq > (limit * limit))
+        return 1; // Collision with circle boundary.
+    return 0;
 }

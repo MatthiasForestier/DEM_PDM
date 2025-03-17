@@ -26,6 +26,7 @@ class Optimization {
         NUM_OPTIMIZERS
     };
 
+    
    public:
     static std::vector<std::string> getOptimizerNames() {
         return {"Gradient Descent",      //

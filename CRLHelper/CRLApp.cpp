@@ -164,7 +164,7 @@ void CRLApp::launch() {
     polyscope::state::userCallback = [&]() {
         /// Main menu window on screen left.
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Once);
-        ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.25, ImGui::GetIO().DisplaySize.y),
+        ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.25, ImGui::GetIO().DisplaySize.y), //
                                  ImGuiCond_Once);
         ImGui::Begin("Menu");
 

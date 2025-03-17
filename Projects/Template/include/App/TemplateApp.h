@@ -11,7 +11,7 @@
 class TemplateApp : public CRLSubApp {
    public:
     /// Model
-    MassSpring model;
+    // MassSpring model;
 
     ///
     Simulation sim;
@@ -27,14 +27,15 @@ class TemplateApp : public CRLSubApp {
     std::string solverType = "Forward Euler"; // or "Backward Euler", etc.
 
     /// Analysis
-    int check_gradient_epsilon_exponent = -4;
+    int check_gradient_epsilon_exponent = -2;
     bool check_gradient_print_all = false;
 
     /// Camera state
     CRLCamera app_camera;
 
    public:
-    Optimization::OptimizationStatus energyMinimizationStep();
+   Optimization::OptimizationStatus energyMinimizationStep();
+   Optimization::OptimizationStatus energyMinimizationStepDyn();
 
    public:
     /// Template Builder functions
