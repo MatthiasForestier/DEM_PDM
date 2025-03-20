@@ -189,7 +189,9 @@ void CRLApp::launch() {
                                  ImGuiCond_Once);
         ImGui::Begin("Run&Check");
         subApp()->makeRunCheckWindow();
+        subApp()->showLoggerWindow();
         ImGui::End();
+        
 
         /// Handle mouse and keyboard controls.
         CRLControlState control_state = getControlState();

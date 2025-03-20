@@ -60,54 +60,6 @@ void Simulation::makeConfigMenu() {
         // Update the simulation's poissonRatio based on the selected index.
         poissonRatio = poissonChoices(currentIndex);
     }
-
-    if (ImGui::Button("↻ Reload Particles")) {
-        // Here you would call your particle creation function.
-        // For example, if you have a function createRandomParticles2D() accessible from this context:
-        particles2D = createRandomParticles2D();
-        insertParticlesIntoGrid();
-    }
-
-    // --- New UI for Scenario Objects ---
-
-    // Toggle flag for activation.
-    static bool activateScenario = false;
-    static bool lastFrameToggleState = false;
-
-    // Provide a few shape choices.
-    static int shapeIndex = 0;
-    const char* shapes[] = {"Circle", "Square"};
-
-    // ImGui Checkbox for toggling on/off.
-    if (ImGui::Checkbox("Activate Scenario Object", &activateScenario)) {
-        // If the user has just toggled OFF, remove the scenario object(s) from the simulation.
-        if (!activateScenario && lastFrameToggleState) {
-            scenarioObjects.clear();
-            std::cout << "Scenario object(s) removed from simulation.\n";
-        }
-        lastFrameToggleState = activateScenario;
-    }
-
-    // If activated, show a combo for shape selection + create button.
-    if (activateScenario) {
-        ImGui::Combo("Shape Choice", &shapeIndex, shapes, IM_ARRAYSIZE(shapes));
-        
-        if (ImGui::Button("Create Scenario")) {
-            // Clear any previously stored scenario objects.
-            scenarioObjects.clear();
-            
-            if (shapeIndex == 0) {
-                // Create a Circle scenario object with 64 segments, radius 1.1, centered at the origin.
-                scenarioObjects.push_back(std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f)));
-            } else {
-                // Create a Square scenario object with half-dimensions 1.1 and 0.9, centered at the origin.
-                scenarioObjects.push_back(std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f)));
-            }
-            buildGridDataStructure();
-            insertParticlesIntoGrid();
-            std::cout << "New scenario object created and stored!\n";
-        }
-    }
 }
 
 void Simulation::buildGridDataStructure() 

@@ -3,7 +3,7 @@
 #include "CRLHelper/CRLSubApp.h"
 #include "CRLHelper/Optimization.h"
 #include "CRLHelper/SensitivityAnalysis.h"
-#include "CRLHelper/Solvers.h"
+#include "CRLHelper/Logger.h"
 
 #include "Projects/Template/include/Model/MassSpring.h"
 #include "Projects/Template/include/App/SplashScreen.h" 
@@ -13,21 +13,30 @@ class TemplateApp : public CRLSubApp {
     /// Model
     // MassSpring model;
 
-    ///
+    /// Main simulation object
     Simulation sim;
+
+    /// Logger
+    Logger logger;
 
     /// Optimizer
     bool optimize = false;
     Optimization optimization;
-    int convergence_tolerance_exponent = -16;
+    I convergence_tolerance_exponent = -16;
 
-    /// Solver
-    bool runSimulation = false;     // A toggle to decide if we should step the simulation
-    Solver* solver = nullptr;       // Pointer to the chosen solver
-    std::string solverType = "Forward Euler"; // or "Backward Euler", etc.
+    /// Dynamic Convergence
+    I exponent_convergence_threshold = -2;
+    F dynamic_convergence_threshold;
+    I maxIter = 100; 
+    I breach = 0;
+    I calls = 0;
+
+    VectorXF globalState_0;
+    VectorXF globalState_1;
+    VectorXF globalState_2;
 
     /// Analysis
-    int check_gradient_epsilon_exponent = -2;
+    I check_gradient_epsilon_exponent = -4;
     bool check_gradient_print_all = false;
 
     /// Camera state
@@ -35,6 +44,7 @@ class TemplateApp : public CRLSubApp {
 
    public:
    Optimization::OptimizationStatus energyMinimizationStep();
+   void reinitializeGlobalState();
    Optimization::OptimizationStatus energyMinimizationStepDyn();
 
    public:
@@ -58,9 +68,8 @@ class TemplateApp : public CRLSubApp {
 
     [[nodiscard]] std::string getName() const override { return "Template"; }
 
-    void createOrUpdateSolver();
-
-   public:
     void getViewerData(std::vector<CRLViewerData> &viewer_data, CRLCamera &viewer_camera) override;
+
+    void showLoggerWindow() override;
     
 };

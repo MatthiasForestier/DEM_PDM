@@ -74,13 +74,13 @@ public:
 class Simulation {
 public:
     // World parameters
-    F timeStep = 1e-4;
-    Vector3F gravity = Vector3F(0.0, 10, 0.0);
+    F timeStep = 1e-3;
+    Vector3F gravity = Vector3F(0.0, 100, 0.0);
     F endTime = 1.0;
     F outputInterval = 1e-2;
     std::string outputDirectory = "output";
     I numParticles = 10;
-    const int maxAttemptsPerParticle = 1000;
+    const int maxAttemptsPerParticle = 100;
     // Display dimensions commented out for now.
     // int displayWidth = 800;
     // int displayHeight = 800;
