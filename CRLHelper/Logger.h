@@ -3,19 +3,21 @@
 
 class Logger {
 public:
-    // Buffers to store the evolution of data.
     std::vector<float> objectiveHistory;
     std::vector<float> gradientNormHistory;
-    
-    // Add a new log entry.
-    void logStep(float objectiveValue, float gradientNorm) {
+    //std::vector<float> conditionHistory; 
+
+    void logStep(float objectiveValue, float gradientNorm) { // float condition
         objectiveHistory.push_back(objectiveValue);
         gradientNormHistory.push_back(gradientNorm);
+        //conditionHistory.push_back(condition);
     }
     
-    // Optionally, add a method to clear logs.
+    // Optionally, a clear function.
     void clear() {
         objectiveHistory.clear();
         gradientNormHistory.clear();
+        //conditionHistory.clear();
     }
 };
+

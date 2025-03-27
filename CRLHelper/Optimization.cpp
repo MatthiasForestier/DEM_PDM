@@ -293,9 +293,9 @@ bool Optimization::linearSolve(const HessianF &hessian, const VectorXF &b, Vecto
         x = solver.solve(b);
 
         /// Check that step has positive dot product with residual.
-        /// F dot_x_b = x.normalized().dot(b.normalized());
-        F dot_x_b = x.dot(b);
-        bool search_dir_correct_sign = (dot_x_b > 1e-6); //> 1e-6;
+        F dot_x_b = x.normalized().dot(b.normalized());
+        // F dot_x_b = x.dot(b);
+        bool search_dir_correct_sign = (dot_x_b > 0); //> 1e-6;
         if (!search_dir_correct_sign) {
             invalid_search_dir_cnt++;
         }
@@ -374,7 +374,7 @@ bool Optimization::linearSolveWoodbury(const HessianF &hessian, const VectorXF &
 
         /// Check that step has positive dot product with residual.
         F dot_x_b = x.normalized().dot(b.normalized());
-        bool search_dir_correct_sign = dot_x_b > 1e-6;
+        bool search_dir_correct_sign = dot_x_b > 0;
         if (!search_dir_correct_sign) {
             invalid_search_dir_cnt++;
         }

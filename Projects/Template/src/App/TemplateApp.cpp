@@ -26,6 +26,7 @@ void TemplateApp::initializeSubApp() {
 }
 
 void TemplateApp::makeConfigWindow() {
+
     if (ImGui::CollapsingHeader("Optimization", ImGuiTreeNodeFlags_DefaultOpen)) {
         optimization.makeConfigMenu();
         ImGui::Checkbox("Optimize", &optimize);
@@ -38,7 +39,7 @@ void TemplateApp::makeConfigWindow() {
         sim.makeConfigMenu();
     }
 
-    if (ImGui::Button("↻ Reload Particles")) {
+    if (ImGui::Button("Reload Particles")) {
         sim.particles2D = sim.createRandomParticles2D();
         sim.insertParticlesIntoGrid();
         reinitializeGlobalState();
@@ -70,11 +71,10 @@ void TemplateApp::makeConfigWindow() {
     // If activated, show a combo for shape selection + create button.
     if (activateScenario) {
         ImGui::Combo("Shape Choice", &shapeIndex, shapes, IM_ARRAYSIZE(shapes));
-        
-        if (ImGui::Button("Create Scenario")) {
-            // Clear any previously stored scenario objects.
+
+        // Use a lambda function for creating the scenario object.
+        auto scenarioObjectCreation = [&]() {
             sim.scenarioObjects.clear();
-            
             if (shapeIndex == 0) {
                 // Create a Circle scenario object with 64 segments, radius 1.1, centered at the origin.
                 sim.scenarioObjects.push_back(std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f)));
@@ -82,11 +82,36 @@ void TemplateApp::makeConfigWindow() {
                 // Create a Square scenario object with half-dimensions 1.1 and 0.9, centered at the origin.
                 sim.scenarioObjects.push_back(std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f)));
             }
+        };
+
+        if (ImGui::Button("Create Scenario")) {
+            scenarioObjectCreation();
             sim.buildGridDataStructure();
             sim.insertParticlesIntoGrid();
             std::cout << "New scenario object created and stored!\n";
         }
+
+        if (ImGui::CollapsingHeader("Scenario Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Toggle animation on/off (this flag is also updated by startScenarioAnimation, so the checkbox is optional)
+            // ImGui::Checkbox("Animate Scenario Object", &sim.animateScenario);
+            // Button to start/reset the animation.
+            if (ImGui::Button("Start Animation")) {
+                scenarioObjectCreation();
+                sim.startScenarioAnimation();
+            }
+            // Allow user to change the duration and distance.
+            ImGui::InputDouble("Animation Duration (s)", &sim.animationDuration, 1.0, 5.0, "%.1f");
+            ImGui::InputDouble("Animation Distance", &sim.animationDistance, 0.1, 1.0, "%.1f");
+        }
     }
+}
+
+
+void TemplateApp::reinitializeGlobalState() {
+    globalState_0 = sim.getGlobalState();
+    sim.globalState_1 = globalState_0; // start with zero velocity/dynamic change
+    sim.globalState_2 = globalState_0;
+    // Optionally, update viewer data immediately here or in the next frame.
 }
 
 void TemplateApp::makeRunCheckWindow() {
@@ -132,6 +157,8 @@ void TemplateApp::makeRunCheckWindow() {
         ImGui::InputInt("## Convergence exponent:", &exponent_convergence_threshold);
         dynamic_convergence_threshold = pow(10.0, exponent_convergence_threshold);
         ImGui::InputInt("max Iteration for Time Stepping", &maxIter, 10.0, 100.0);
+        ImGui::Checkbox("Viscosity", &sim.viscosity);
+        ImGui::Checkbox("Friction", &sim.friction);
     }
 
     // --- New button to print breach and calls to the terminal ---
@@ -141,27 +168,38 @@ void TemplateApp::makeRunCheckWindow() {
 }
 
 void TemplateApp::showLoggerWindow() {
-    // Create a child region to embed the logger content inside the "Run&Check" window.
-    ImGui::BeginChild("LoggerChild", ImVec2(0, 400), true); // 200 pixels tall; adjust as needed
+    // Use a child region to embed the logger content inside the existing window.
+    ImGui::BeginChild("LoggerChild", ImVec2(0, 450), true); // Adjust size as needed
 
-    // Display a plot for the objective function evolution.
+    // Objective Function Plot
     if (!logger.objectiveHistory.empty()) {
         ImGui::Text("Objective Function");
         ImGui::PlotLines("##Objective", logger.objectiveHistory.data(),
                          static_cast<int>(logger.objectiveHistory.size()),
                          0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0,80));
     }
-    // Display a plot for the gradient norm evolution.
+    
+    // Gradient Norm Plot
     if (!logger.gradientNormHistory.empty()) {
         ImGui::Text("Gradient Norm");
         ImGui::PlotLines("##Gradient", logger.gradientNormHistory.data(),
                          static_cast<int>(logger.gradientNormHistory.size()),
                          0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0,80));
     }
-    // Optionally, show the latest numeric values.
-    if (!logger.objectiveHistory.empty() && !logger.gradientNormHistory.empty()) {
+    
+    // Condition Number Plot
+    // if (!logger.conditionHistory.empty()) {
+    //     ImGui::Text("Hessian Condition Number");
+    //     ImGui::PlotLines("##Condition", logger.conditionHistory.data(),
+    //                      static_cast<int>(logger.conditionHistory.size()),
+    //                      0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0,80));
+    // }
+    
+    // Latest values (optional)
+    if (!logger.objectiveHistory.empty() && !logger.gradientNormHistory.empty()){ //&& !logger.conditionHistory.empty()) {
         ImGui::Text("Latest Objective: %f", logger.objectiveHistory.back());
         ImGui::Text("Latest Gradient Norm: %f", logger.gradientNormHistory.back());
+        //ImGui::Text("Latest Condition Number: %f", logger.conditionHistory.back());
     }
     
     ImGui::EndChild();
@@ -171,40 +209,42 @@ void TemplateApp::showLoggerWindow() {
 void TemplateApp::mainLoop() {
     if (optimize) {
         if (sim.dynamic) {
-            // Use the dynamic formulation.
             Optimization::OptimizationStatus status = energyMinimizationStepDyn();
             calls += 1;
         } else {
-            // Use the regular (static) formulation.
             Optimization::OptimizationStatus status = energyMinimizationStep();
         }
     }
+    // Update the scenario object animation each frame using the simulation time step.
+    sim.updateScenarioAnimation(sim.timeStep);
 }
+
 
 Optimization::OptimizationStatus TemplateApp::energyMinimizationStep() {
     // Get the global state vector representing all particles.
-    globalState_0 = sim.getGlobalState();
+    Simulation simCopy = sim;
+    globalState_0 = simCopy.getGlobalState();
 
     // Set up the optimization functions to work on the global state:
     optimization.objective_function = [&](const VectorXF &y, F &value) {
-        sim.setGlobalState(y);
-        sim.updateAuxiliaryStructures();
-        sim.compute_energy(value);
+        simCopy.setGlobalState(y);
+        simCopy.updateAuxiliaryStructures();
+        simCopy.compute_energy(value);
         return true;
     };
     optimization.gradient_function = [&](const VectorXF &y, F &value, VectorXF &gradient) {
-        sim.setGlobalState(y);
-        sim.updateAuxiliaryStructures();
-        sim.compute_energy(value);
-        sim.compute_gradient(gradient);
+        simCopy.setGlobalState(y);
+        simCopy.updateAuxiliaryStructures();
+        simCopy.compute_energy(value);
+        simCopy.compute_gradient(gradient);
         return true;
     };
     optimization.hessian_function = [&](const VectorXF &y, F &value, VectorXF &gradient, HessianF &hessian) {
-        sim.setGlobalState(y);
-        sim.updateAuxiliaryStructures();
-        sim.compute_energy(value);
-        sim.compute_gradient(gradient);
-        sim.compute_hessian(hessian.A);
+        simCopy.setGlobalState(y);
+        simCopy.updateAuxiliaryStructures();
+        simCopy.compute_energy(value);
+        simCopy.compute_gradient(gradient);
+        simCopy.compute_hessian(hessian.A);
         return true;
     };
 
@@ -212,79 +252,58 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStep() {
     auto status = optimization.step(globalState_0);
 
     // Update the simulation with the optimized state.
-    sim.setGlobalState(globalState_0);
+    sim.setGlobalState(simCopy.getGlobalState());
     sim.updateAuxiliaryStructures();
-
+    
+    // Log the objective, gradient norm, and Hessian condition number.
     F currentObjective;
     optimization.objective_function(globalState_0, currentObjective);
     VectorXF currentGradient;
     optimization.gradient_function(globalState_0, currentObjective, currentGradient);
     float gradNorm = currentGradient.norm();
-    logger.logStep(static_cast<float>(currentObjective), gradNorm);
+    HessianF hessian(globalState_0.size());
+    optimization.hessian_function(globalState_0, currentObjective, currentGradient, hessian);
+    // MatrixXF hessianDense = hessian.evalDense();
+    // float condition = computeConditionNumber(hessianDense);
+
+    logger.logStep(static_cast<float>(currentObjective), gradNorm); //, condition);
 
     return status;
 }
 
-void TemplateApp::reinitializeGlobalState() {
-    globalState_0 = sim.getGlobalState();
-    globalState_1 = globalState_0; // start with zero velocity/dynamic change
-    globalState_2 = globalState_0;
-    // Optionally, update viewer data immediately here or in the next frame.
-}
-
 Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
-    globalState_0 = sim.getGlobalState();
+    Simulation simCopy = sim;
+    globalState_0 = simCopy.getGlobalState();
     Optimization::OptimizationStatus status;
-    int iter = 0;
-
-    // Ensure history vectors are sized correctly.
-    if (globalState_1.size() != globalState_0.size() || globalState_2.size() != globalState_0.size()) {
-        globalState_1 = globalState_0; 
-        globalState_2 = globalState_0;
-    }
+    I iter = 0;
     
     F lambda = 1e0;
     F dynamicWeight = lambda / (sim.timeStep * sim.timeStep);
 
     optimization.objective_function = [&](const VectorXF &y, F &value) {
-        sim.setGlobalState(y);
-        sim.updateAuxiliaryStructures();
-        sim.compute_energy(value);
-        if (sim.dynamic) {
-            if (globalState_1.size() == y.size()){
-                value += dynamicWeight * (0.5 * y.squaredNorm() - y.dot(2 * globalState_1 - globalState_2));
-            }else{
-                reinitializeGlobalState();
-                value += dynamicWeight * (0.5 * y.squaredNorm() - y.dot(2 * globalState_1 - globalState_2));
-            }
-        }
+        simCopy.setGlobalState(y);
+        simCopy.updateAuxiliaryStructures();
+        simCopy.updateEffectiveNeighborCounts();
+        simCopy.compute_energy_dyn(value);
         return true;
     };
 
     optimization.gradient_function = [&](const VectorXF &y, F &value, VectorXF &gradient) {
-        sim.setGlobalState(y);
-        sim.updateAuxiliaryStructures();
-        sim.compute_gradient(gradient);
-        if (sim.dynamic) {
-            if (globalState_1.size() == y.size()){
-                gradient += dynamicWeight * (y - 2 * globalState_1 + globalState_2);
-            }else{
-                reinitializeGlobalState();
-                gradient += dynamicWeight * (y - 2 * globalState_1 + globalState_2);
-            }
-        }
+        simCopy.setGlobalState(y);
+        simCopy.updateAuxiliaryStructures();
+        simCopy.updateEffectiveNeighborCounts();
+        simCopy.compute_energy_dyn(value);
+        simCopy.compute_gradient_dyn(gradient);
         return true;
     };
 
     optimization.hessian_function = [&](const VectorXF &y, F &value, VectorXF &gradient, HessianF &hessian) {
-        sim.setGlobalState(y);
-        sim.updateAuxiliaryStructures();
-        sim.compute_energy(value);
-        sim.compute_gradient(gradient);
-        sim.compute_hessian(hessian.A);
-        for (int i = 0; i < y.size(); i++) {
-            hessian.A.coeffRef(i, i) += dynamicWeight;
-        }
+        simCopy.setGlobalState(y);
+        simCopy.updateAuxiliaryStructures();
+        simCopy.updateEffectiveNeighborCounts();
+        simCopy.compute_energy_dyn(value);
+        simCopy.compute_gradient_dyn(gradient);
+        simCopy.compute_hessian_dyn(hessian.A);
         return true;
     };
 
@@ -303,21 +322,28 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
         // diff = (grad - grad_old).norm();
         //std::cout<<grad.norm()<<std::endl;
         iter++;
+        if (iter >= maxIter) {
+            std::cout << "Maximum iterations reached. Stopping simulation." << std::endl;
+            optimize = false;
+            break;
+        }
     }while (grad.norm() > dynamic_convergence_threshold && iter < maxIter);
     
-    sim.setGlobalState(globalState_0);
+    sim.setGlobalState(simCopy.getGlobalState());
     sim.updateAuxiliaryStructures();
-    globalState_2 = globalState_1;
-    globalState_1 = globalState_0;
-    // If the loop ended due to reaching maxIter, count it as a breach.
-    if (iter >= maxIter) {
-        breach += 1;
-    }
+    sim.updateEffectiveNeighborCountsFinal();
+    sim.globalState_2 = sim.globalState_1;
+    sim.globalState_1 = globalState_0;
 
     F currentObjective;
     optimization.objective_function(globalState_0, currentObjective);
     float gradNorm = grad.norm();
-    logger.logStep(static_cast<float>(currentObjective), gradNorm);
+    HessianF hessian(globalState_0.size());
+    optimization.hessian_function(globalState_0, currentObjective, grad, hessian);
+    MatrixXF hessianDense = hessian.evalDense();
+    //float condition = computeConditionNumber(hessianDense);
+
+    logger.logStep(static_cast<float>(currentObjective), gradNorm);  //, condition);
 
     return status;
 }
@@ -332,12 +358,7 @@ void TemplateApp::checkGradient(int order) {
         sim.setGlobalState(y);
         sim.compute_energy(value);
         if (sim.dynamic) {
-            if (globalState_1.size() == y.size()){
-                value += dynamicWeight * (0.5 * y.squaredNorm() - y.dot(2 * globalState_1 - globalState_2));
-            }else{
-                reinitializeGlobalState();
-                value += dynamicWeight * (0.5 * y.squaredNorm() - y.dot(2 * globalState_1 - globalState_2));
-            }
+            sim.compute_energy_dyn(value);
         }
         return true;
     };
@@ -347,12 +368,7 @@ void TemplateApp::checkGradient(int order) {
         sim.setGlobalState(y);
         sim.compute_gradient(gradient);
         if (sim.dynamic) {
-            if (globalState_1.size() == y.size()){
-                gradient += dynamicWeight * (y - 2 * globalState_1 + globalState_2);
-            }else{
-                reinitializeGlobalState();
-                gradient += dynamicWeight * (y - 2 * globalState_1 + globalState_2);
-            }
+            sim.compute_gradient_dyn(gradient);
         }
         return true;
     };
@@ -363,15 +379,7 @@ void TemplateApp::checkGradient(int order) {
         SparseMatrixF hessian_sparse;
         sim.compute_hessian(hessian_sparse);
         if (sim.dynamic) {
-            int nParticles = static_cast<int>(sim.particles2D.size());
-            for (int i = 0; i < nParticles; i++) {
-                int idx_x = 3 * i;
-                int idx_y = 3 * i + 1;
-                int idx_theta = 3 * i + 2;
-                hessian_sparse.coeffRef(idx_x, idx_x) += dynamicWeight;
-                hessian_sparse.coeffRef(idx_y, idx_y) += dynamicWeight;
-                hessian_sparse.coeffRef(idx_theta, idx_theta) += dynamicWeight;
-            }
+            sim.compute_hessian_dyn(hessian_sparse);
         }
         hessian = hessian_sparse.toDense();
         return true;

@@ -27,6 +27,8 @@ void Simulation::makeConfigMenu() {
     ImGui::InputDouble("Density", &density, 10.0, 100.0, "%.2f");
     ImGui::InputDouble("Boundary Overlap", &overlapParam, 10.0, 100.0, "%.2f");
     ImGui::InputDouble("Interaction Overlap", &interactionParam, 10.0, 100.0, "%.2f");
+    ImGui::InputDouble("Viscosity Coefficient", &viscosity_coeff, 0.01, 0.05, "%.3f");
+    ImGui::InputDouble("Sigma", &sigma, 0.01, 0.05, "%.3f");
     // ImGui::InputDouble("Contact Bond Normal Stiffness", &contactBondNormalStiffness, 1.0, 5.0, "%.2f");
     // ImGui::InputDouble("Contact Stiffness Ratio", &contactStiffnessRatio, 0.01, 0.05, "%.2f");
     // ImGui::InputDouble("Interparticle Friction", &interparticleFriction, 0.01, 0.05, "%.2f");
@@ -42,24 +44,24 @@ void Simulation::makeConfigMenu() {
     // ImGui::InputDouble("Loading Velocity", &loadingVelocity, 0.01, 0.05, "%.2f");
 
     // Static labels for display.
-    static const std::vector<const char*> poissonChoiceLabels = {"0.05", "0.15", "0.25", "0.35", "0.45"};
+    // static const std::vector<const char*> poissonChoiceLabels = {"0.05", "0.15", "0.25", "0.35", "0.45"};
 
     // Determine the current index based on sim.poissonRatio and sim.poissonChoices.
-    int currentIndex = 0;
-    for (int i = 0; i < poissonChoices.size(); i++) {
-        if (std::abs(poissonChoices(i) - poissonRatio) < 1e-6) {
-            currentIndex = i;
-            break;
-        }
-    }
+    // int currentIndex = 0;
+    // for (int i = 0; i < poissonChoices.size(); i++) {
+    //     if (std::abs(poissonChoices(i) - poissonRatio) < 1e-6) {
+    //         currentIndex = i;
+    //         break;
+    //     }
+    // }
 
     // Create a single combo box for Poisson Ratio.
-    if (ImGui::Combo("Poisson Ratio", &currentIndex,
-                     poissonChoiceLabels.data(),
-                     static_cast<int>(poissonChoices.size()))) {
-        // Update the simulation's poissonRatio based on the selected index.
-        poissonRatio = poissonChoices(currentIndex);
-    }
+    // if (ImGui::Combo("Poisson Ratio", &currentIndex,
+    //                  poissonChoiceLabels.data(),
+    //                  static_cast<int>(poissonChoices.size()))) {
+    //     // Update the simulation's poissonRatio based on the selected index.
+    //     poissonRatio = poissonChoices(currentIndex);
+    // }
 }
 
 void Simulation::buildGridDataStructure() 
@@ -70,11 +72,11 @@ void Simulation::buildGridDataStructure()
     }
     // Use the cached bounding box (BB) from the first scenario object.
     const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
-    ;
-    minX = bbox.min_x;
-    maxX = bbox.max_x;
-    minY = bbox.min_y;
-    maxY = bbox.max_y;
+    F factor = 1.1; // Add a small buffer around the BB.
+    minX = bbox.min_x; // * factor;
+    maxX = bbox.max_x; // * factor;
+    minY = bbox.min_y; // * factor;
+    maxY = bbox.max_y; // * factor;
 
     // Compute the number of cells along each axis.
     numCellsX = static_cast<int>(std::ceil((maxX - minX) / cellSize));
@@ -233,10 +235,19 @@ void Simulation::compute_energy(F &value) const {
         Particle2D p = particles2D[i];
         detectBoundaryCollision2D(p);
 
-        // Gravitational potential energy: m * g * y.
-        value += gravity(1) * p.pos(1); //p.mass *
-
-        // Energy contributions due to boundary collisions.
+        // Check if at least one scenario object is available.
+        if (!scenarioObjects.empty()) {
+            // Use the bounding box from the first scenario object.
+            const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
+            F factor = 1.1; // Optional: apply a small buffer if needed.
+            // You can adjust the baseline using the bounding box. For instance:
+            F minYAdjusted = bbox.min_y; // Optionally, multiply by factor if required.
+            value += gravity(1) * (p.pos(1) - minYAdjusted); // Compute energy relative to minY.
+        } else {
+            // Fallback: compute gravitational energy without a scenario object.
+            value += gravity(1) * p.pos(1);
+        }
+        
         if (p.BoundaryCollision == 1) {
             for (const auto &so : scenarioObjects) {
                 if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
@@ -306,7 +317,7 @@ void Simulation::compute_energy(F &value) const {
             // Compute overlap only if particles are close.
             F overlap = (p.radius + q.radius) - d;
             if (overlap > 0) {
-                value += 0.5 * interactionParam * overlap * overlap;
+                value += 0.5 * interactionParam * overlap * overlap / (1 + overlap * overlap);
             }
         }
     }
@@ -539,6 +550,124 @@ void Simulation::compute_hessian(SparseMatrixF &hessian) const {
     }
 }
 
+void Simulation::compute_energy_dyn(F &value) {
+
+    F dynamicWeight = lambda / (timeStep * timeStep);
+    compute_energy(value);
+    
+    if (globalState_1.size() == globalPositions.size()) {
+        value += dynamicWeight * (0.5 * (globalPositions - globalState_1).squaredNorm() 
+                                   - globalPositions.dot(globalState_1 - globalState_2));
+    } else {
+        globalState_1 = globalPositions;
+        globalState_2 = globalPositions;
+        value += dynamicWeight * (0.5 * (globalPositions - globalState_1).squaredNorm() 
+                                   - globalPositions.dot(globalState_1 - globalState_2));
+    }
+    
+    if (viscosity) {
+        for (size_t i = 0; i < particles2D.size(); i++) {
+            // Use the filtered effective neighbor count stored in the particle.
+            F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
+            VectorXF diff = globalPositions.segment(3 * i, 3) - 
+                            globalState_1.segment(3 * i, 3);
+            value += 0.5 * viscosity_coeff * effectiveCountFiltered / (timeStep * timeStep) * diff.squaredNorm();
+        }
+    }
+}
+
+void Simulation::compute_gradient_dyn(VectorXF &gradient) {
+    
+    F dynamicWeight = lambda / (timeStep * timeStep);
+    compute_gradient(gradient);
+    
+    if (globalState_1.size() == globalPositions.size()) {
+        gradient += dynamicWeight * (globalPositions - 2 * globalState_1 + globalState_2);
+    } else {
+        globalState_1 = globalPositions;
+        globalState_2 = globalPositions;
+        gradient += dynamicWeight * (globalPositions - 2 * globalState_1 + globalState_2);
+    }
+    
+    if (viscosity) {
+        for (size_t i = 0; i < particles2D.size(); i++) {
+            F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
+            gradient.segment(3 * i, 3) += viscosity_coeff * effectiveCountFiltered / (timeStep * timeStep) *
+                                          (globalPositions.segment(3 * i, 3) - 
+                                           globalState_1.segment(3 * i, 3));
+        }
+    }
+}
+
+void Simulation::compute_hessian_dyn(SparseMatrixF &hessian) {
+    
+    F dynamicWeight = lambda / (timeStep * timeStep);
+    compute_hessian(hessian);
+    
+    for (int i = 0; i < (3 * static_cast<int>(particles2D.size())); i++) {
+        hessian.coeffRef(i, i) += dynamicWeight;
+    }
+    
+    if (viscosity) {
+        for (size_t i = 0; i < particles2D.size(); i++) {
+            F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
+            for (int j = 0; j < 3; j++) {
+                int index = static_cast<int>(3 * i + j);
+                hessian.coeffRef(index, index) += viscosity_coeff * effectiveCountFiltered / (timeStep * timeStep);
+            }
+        }
+    }
+}
+
+void Simulation::updateEffectiveNeighborCounts() {
+    // Loop over each particle.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        F rawEffectiveCount = 0;
+        // Compute the raw effective count using a soft kernel.
+        // Here we use: w(d) = 1 / (1 + (d/sigma)^2)
+        for (int j : particles2D[i].neighborIndices) {
+            VectorXF diffNeighbor = globalPositions.segment(3 * i, 3) - 
+                                      globalPositions.segment(3 * j, 3);
+            F d2 = diffNeighbor.squaredNorm();
+            rawEffectiveCount += std::exp(- d2 / (sigma * sigma));//1.0 / (1.0 + d2 / (sigma * sigma));
+        }
+        // Store the raw count.
+        particles2D[i].effectiveCountCurrent = rawEffectiveCount;
+        
+        // Apply temporal filtering:
+        // filtered = alpha * (current raw) + (1 - alpha) * (previous filtered)
+        F filteredCount = alpha * rawEffectiveCount + (1 - alpha) * particles2D[i].prevEffectiveCount;
+        // Optionally, clamp the value (for example, to a maximum of 1.0) to avoid stiffness.
+        filteredCount = std::min(filteredCount, F(1.0));
+    }
+}
+
+void Simulation::updateEffectiveNeighborCountsFinal() {
+    // Loop over each particle.
+    for (size_t i = 0; i < particles2D.size(); i++) {
+        F rawEffectiveCount = 0;
+        // Compute the raw effective count using a soft kernel.
+        // Here we use: w(d) = 1 / (1 + (d/sigma)^2)
+        for (int j : particles2D[i].neighborIndices) {
+            VectorXF diffNeighbor = globalPositions.segment(3 * i, 3) - 
+                                      globalPositions.segment(3 * j, 3);
+            F d2 = diffNeighbor.squaredNorm();
+            rawEffectiveCount +=  std::exp(- d2 / (sigma * sigma));//1.0 / (1.0 + d2 / (sigma * sigma));
+        }
+        // Store the raw count.
+        particles2D[i].effectiveCountCurrent = rawEffectiveCount;
+        
+        // Apply temporal filtering:
+        // filtered = alpha * (current raw) + (1 - alpha) * (previous filtered)
+        F filteredCount = alpha * rawEffectiveCount + (1 - alpha) * particles2D[i].prevEffectiveCount;
+        // Optionally, clamp the value (for example, to a maximum of 1.0) to avoid stiffness.
+        filteredCount = std::min(filteredCount, F(1.0));
+        
+        // Update the particle's stored filtered effective count.
+        particles2D[i].prevEffectiveCount = filteredCount;
+    }
+}
+
 Particle2D::Particle2D(F radius, const Simulation& simParams)
     : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
 {
@@ -637,6 +766,49 @@ void Simulation::detectBoundaryCollision2D(Particle2D &p) const {
     }
 }
 
+void Simulation::startScenarioAnimation() {
+    if (!scenarioObjects.empty()) {
+        animationTimer = 0;
+        // Store the current position of the first scenario object as the starting point.
+        initialScenarioPosition = scenarioObjects[0]->position;
+        animateScenario = true;
+    }
+}
+
+void Simulation::updateScenarioAnimation(F dt) {
+    if (!animateScenario || scenarioObjects.empty())
+        return;
+
+    // Increment the timer.
+    animationTimer += dt;
+    if (animationTimer > animationDuration) {
+        animationTimer = animationDuration;
+        animateScenario = false; // Stop the animation once complete.
+    }
+
+    // Compute progress as a fraction between 0 and 1.
+    F t = animationTimer / animationDuration;
+
+    // Start from the initial position.
+    Vector3F newPos = initialScenarioPosition;
+    
+    // Apply linear motion along the x-axis.
+    // newPos(0) += t * animationDistance;
+    
+    // Superimpose a shaking motion along the y-axis.
+    // Here, the y-offset is given by 0.5*sin(4PI*t) (t goes from 0 to 1).
+    newPos(0) += animationDistance * sin(8.0 * M_PI * t);
+
+    // Update each scenario object (regenerate its vertices, and update auxiliary structures).
+    for (auto &so : scenarioObjects) {
+         so->position = newPos;
+         so->generateVertices();
+         buildGridDataStructure();
+         updateAuxiliaryStructures();
+    }
+}
+
+
 Square::Square(F halfLength, F halfWidth, const Vector3F& pos)
     : halfLength(halfLength), halfWidth(halfWidth)
 {
@@ -711,3 +883,4 @@ int Circle::detectCollision(const Particle2D &p) const {
         return 1; // Collision with circle boundary.
     return 0;
 }
+

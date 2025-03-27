@@ -1,6 +1,8 @@
 #include "CRLHelper/Hessian.h"
 #include "CRLHelper/EigenHelper.h"
 
+#include <Eigen/Eigenvalues>
+
 void HessianF::setZero(int rows) {
     A.resize(rows, rows);
     A.setZero();

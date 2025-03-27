@@ -4,6 +4,8 @@
 #include "CRLHelper/Optimization.h"
 #include "CRLHelper/SensitivityAnalysis.h"
 #include "CRLHelper/Logger.h"
+#include "CRLHelper/Algebra.h"
+#include "CRLHelper/VecMatDef.h"
 
 #include "Projects/Template/include/Model/MassSpring.h"
 #include "Projects/Template/include/App/SplashScreen.h" 
@@ -16,6 +18,9 @@ class TemplateApp : public CRLSubApp {
     /// Main simulation object
     Simulation sim;
 
+    /// Global state
+    VectorXF globalState_0;
+
     /// Logger
     Logger logger;
 
@@ -25,15 +30,11 @@ class TemplateApp : public CRLSubApp {
     I convergence_tolerance_exponent = -16;
 
     /// Dynamic Convergence
-    I exponent_convergence_threshold = -2;
+    I exponent_convergence_threshold = -3;
     F dynamic_convergence_threshold;
-    I maxIter = 100; 
+    I maxIter = 1000; 
     I breach = 0;
     I calls = 0;
-
-    VectorXF globalState_0;
-    VectorXF globalState_1;
-    VectorXF globalState_2;
 
     /// Analysis
     I check_gradient_epsilon_exponent = -4;
