@@ -1,12 +1,22 @@
+// main.cpp
 #include "CRLHelper/CRLApp.h"
-#include "Projects/Template/include/App/TemplateApp.h"
-#include "Projects/Template/include/App/SplashScreen.h"
+#include "./Projects/Template/include/App/SplashScreen.h"
+#include "./Projects/Template/include/App/ExportSimulation.h"
 
 int main() {
-    SplashScreenResult InitParam = showSplashScreen();
+    SplashScreen splashScreen;
+    SplashScreenResult initParam = splashScreen.getResult();
+
+    if (initParam.exportMode) {
+        // Run export simulation and then exit.
+        exportSimulationBehavior(initParam);
+        return 0;
+    }
+
+    // Otherwise, launch the interactive application.
     CRLApp app;
-    auto myTemplateApp = std::make_shared<TemplateApp>(InitParam);
-    app.subapps_selector.second.push_back(myTemplateApp);
+    // Retrieve the TemplateApp from the splash screen.
+    app.subapps_selector.second.push_back(splashScreen.getTemplateApp());
     app.launch();
 
     return 0;

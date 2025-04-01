@@ -8,7 +8,7 @@
 #include "CRLHelper/VecMatDef.h"
 
 #include "Projects/Template/include/Model/MassSpring.h"
-#include "Projects/Template/include/App/SplashScreen.h" 
+#include "Projects/Template/include/App/SplashScreenResult.h" 
 
 class TemplateApp : public CRLSubApp {
    public:
@@ -50,9 +50,8 @@ class TemplateApp : public CRLSubApp {
 
    public:
     /// Template Builder functions
-    TemplateApp() = default;
-    
     TemplateApp(const SplashScreenResult &initParam);
+    TemplateApp() = default;
 
     /// Template related functions
     void initializeSubApp() override;

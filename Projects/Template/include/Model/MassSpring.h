@@ -148,7 +148,7 @@ public:
     // World parameters.
     F timeStep = 1e-2;
     F lambda = 1e0;
-    Vector3F gravity = Vector3F(0.0, 10, 0.0);
+    Vector3F gravity = Vector3F(0.0, 1, 0.0);
     F endTime = 1.0;
     F outputInterval = 1e-2;
     std::string outputDirectory = "output";

@@ -1,13 +1,39 @@
 #ifndef SPLASHSCREEN_H
 #define SPLASHSCREEN_H
 
-// Displays a splash screen allowing the user to choose between 2D and 3D modes.
-// Returns true if 3D mode is selected, false if 2D mode is selected.
-struct SplashScreenResult {
-    bool use3D;       // true for 3D mode, false for 2D mode
-    // int numParticles; // number of particles for the simulation
-};
+#include <memory>
+#include "SplashScreenResult.h" // Use the new header.
+#include "TemplateApp.h"        // TemplateApp will also include SplashScreenResult.h
+#include "CRLHelper/VecMatDef.h"
 
+// The existing function (if still needed)
 SplashScreenResult showSplashScreen();
+
+// New SplashScreen class that holds a TemplateApp instance.
+class SplashScreen {
+public:
+    SplashScreen() {
+        m_result = showSplashScreen();
+        // Create the TemplateApp instance using the obtained result.
+        m_templateApp = std::make_shared<TemplateApp>(m_result);
+    }
+    
+    const SplashScreenResult& getResult() const { return m_result; }
+    
+    std::shared_ptr<TemplateApp> getTemplateApp() const { return m_templateApp; }
+    
+    // Forward TemplateApp calls.
+    Optimization::OptimizationStatus energyMinimizationStepDyn() {
+        return m_templateApp->energyMinimizationStepDyn();
+    }
+    
+    Optimization::OptimizationStatus energyMinimizationStep() {
+        return m_templateApp->energyMinimizationStep();
+    }
+    
+private:
+    SplashScreenResult m_result;
+    std::shared_ptr<TemplateApp> m_templateApp;
+};
 
 #endif // SPLASHSCREEN_H

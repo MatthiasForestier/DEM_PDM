@@ -11,8 +11,13 @@
 
 
 TemplateApp::TemplateApp(const SplashScreenResult &initParam) {
-    // Simply set use3D in sim based on the splash screen's flag
+    // Initialize your simulation parameters using initParam.
+    // For instance:
     sim.use3D = initParam.use3D;
+    sim.timeStep = initParam.timeStep;
+    sim.dynamic = initParam.dynamic;
+    sim.friction = initParam.viscosity;
+    // ... initialize any other simulation parameters ...
 }
 
 void TemplateApp::initializeSubApp() {
@@ -224,7 +229,6 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStep() {
     // Get the global state vector representing all particles.
     Simulation simCopy = sim;
     globalState_0 = simCopy.getGlobalState();
-
     // Set up the optimization functions to work on the global state:
     optimization.objective_function = [&](const VectorXF &y, F &value) {
         simCopy.setGlobalState(y);
@@ -283,7 +287,7 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
     optimization.objective_function = [&](const VectorXF &y, F &value) {
         simCopy.setGlobalState(y);
         simCopy.updateAuxiliaryStructures();
-        simCopy.updateEffectiveNeighborCounts();
+        // simCopy.updateEffectiveNeighborCounts();
         simCopy.compute_energy_dyn(value);
         return true;
     };
@@ -291,7 +295,7 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
     optimization.gradient_function = [&](const VectorXF &y, F &value, VectorXF &gradient) {
         simCopy.setGlobalState(y);
         simCopy.updateAuxiliaryStructures();
-        simCopy.updateEffectiveNeighborCounts();
+        // simCopy.updateEffectiveNeighborCounts();
         simCopy.compute_energy_dyn(value);
         simCopy.compute_gradient_dyn(gradient);
         return true;
@@ -300,7 +304,7 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
     optimization.hessian_function = [&](const VectorXF &y, F &value, VectorXF &gradient, HessianF &hessian) {
         simCopy.setGlobalState(y);
         simCopy.updateAuxiliaryStructures();
-        simCopy.updateEffectiveNeighborCounts();
+        // simCopy.updateEffectiveNeighborCounts();
         simCopy.compute_energy_dyn(value);
         simCopy.compute_gradient_dyn(gradient);
         simCopy.compute_hessian_dyn(hessian.A);
@@ -324,6 +328,7 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
         iter++;
         if (iter >= maxIter) {
             std::cout << "Maximum iterations reached. Stopping simulation." << std::endl;
+            // std::cout << iter << std::endl;
             optimize = false;
             break;
         }
