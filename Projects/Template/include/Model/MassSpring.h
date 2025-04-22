@@ -81,6 +81,27 @@ public:
     }
 };
 
+class Tunnel2D : public ScenarioObject {
+    public:
+        /* halfWidth  = ±Y  extent  (the tunnel “height”)
+           halfLength = only for drawing ‑– pick something long (e.g. 3 × halfWidth) */
+        F halfWidth;
+        F halfLength;
+    
+        BoundingBox BB;
+    
+        Tunnel2D(F halfLen, F halfWid, const Vector3F& pos);
+    
+        /* overrides */
+        void generateVertices()               override;
+        int  detectCollision(const Particle2D& p) const override;
+        BoundingBox getBoundingBox()   const   override { return BB; }
+    
+        std::unique_ptr<ScenarioObject> clone() const override {
+            return std::make_unique<Tunnel2D>(*this);
+        }
+    };
+
 //------------------------------------------------------------------------------
 // Particles
 //------------------------------------------------------------------------------
@@ -98,12 +119,13 @@ public:
     // Moments.
     Vector3F moment;
 
-    int BoundaryCollision = 0;
-    int SquareCollision = 0;
+    I BoundaryCollision = 0;
+    I SquareCollision = 0;
     std::vector<I> neighborIndices;
     F effectiveCountCurrent = 0;  
     F prevEffectiveCount = 0; 
     F radius;
+    I ix = 0; 
     F mass;
     F inertia; // Moment of inertia for a disc: (1/2)*mass*radius^2
     Color color = Color(0.678f, 0.847f, 0.902f);
@@ -125,8 +147,8 @@ public:
     // Moments.
     Vector3F moment;
 
-    int BoundaryCollision = 0;
-    int SquareCollision = 0;
+    I BoundaryCollision = 0;
+    I SquareCollision = 0;
     std::vector<I> neighborIndices;
     F effectiveCountCurrent = 0;  
     F prevEffectiveCount = 0; 
@@ -153,7 +175,7 @@ public:
     F outputInterval = 1e-2;
     std::string outputDirectory = "output";
     I numParticles = 100;
-    const int maxAttemptsPerParticle = 100;
+    const int maxAttemptsPerParticle = 10000;
     std::vector<std::unique_ptr<ScenarioObject>> scenarioObjects;
     bool use3D = false;
 
@@ -161,11 +183,17 @@ public:
     F density = 2780.0; // [kg/m^3]
     F overlapParam = 1000000;
     F interactionParam = 100000;
+
+    //Particles shape related parameters.
+    bool is_circular = true;
+    bool is_square = false;
+    bool is_elliptical = false;
     F mean = 0.03;  // [m]
     F std = 0.01;  // [m]
 
     // Grid-related parameters.
-    F cellSize = mean * 3;
+    F maxParticleRadius = 0.0;
+    F cellSize = 0.0;
     int numCellsX;
     int numCellsY;
     F minX;
@@ -185,7 +213,7 @@ public:
     /// Animation parameters.
     bool animateScenario = false;
     F animationTimer = 0;         // Elapsed time.
-    F animationDuration = 2.0;      // Duration (seconds).
+    F animationDuration = 5.0;      // Duration (seconds).
     F animationDistance = 0.2;      // Distance along x.
     Vector3F initialScenarioPosition = Vector3F::Zero();
 
@@ -195,6 +223,19 @@ public:
     VectorXF globalState_2;
     std::vector<Particle2D> particles2D;
     std::vector<Particle3D> particles3D;
+
+    //Experiment parameters.
+    enum class Experiment { Default = 0, ShearFlow = 1 };
+    Experiment experiment = Experiment::Default;
+
+    // Shear‐flow parameters
+    bool periodicX       = false;    // wrap X
+    F  fluidViscosity    = 1.0f;     // ν in F_drag = ν ||v_p−v_f||²
+    F  V0                = 1.0f;     // max fluid speed
+    F  L                 = 1.0f;     // half‐height of tunnel
+    F     pinK      = 1e-6;       // << spring stiffness
+    F     pinXref   = 0.0;        // << reference position
+
 
 public:
     Simulation() = default;
@@ -214,8 +255,12 @@ public:
           density(other.density),
           overlapParam(other.overlapParam),
           interactionParam(other.interactionParam),
+          is_circular(other.is_circular),
+          is_square(other.is_square),
+          is_elliptical(other.is_elliptical),
           mean(other.mean),
           std(other.std),
+          maxParticleRadius(other.maxParticleRadius),
           cellSize(other.cellSize),
           numCellsX(other.numCellsX),
           numCellsY(other.numCellsY),
@@ -239,7 +284,14 @@ public:
           globalState_1(other.globalState_1),
           globalState_2(other.globalState_2),
           particles2D(other.particles2D),
-          particles3D(other.particles3D)
+          particles3D(other.particles3D),
+          experiment(other.experiment),
+          periodicX(other.periodicX),
+          fluidViscosity(other.fluidViscosity),
+          V0(other.V0),
+          L(other.L),
+          pinK(other.pinK),
+          pinXref(other.pinXref)
     {
         // Deep copy scenario objects using clone().
         for (const auto &obj : other.scenarioObjects) {
@@ -279,4 +331,11 @@ public:
 
     void startScenarioAnimation();
     void updateScenarioAnimation(F dt);
+
+    inline void shearFlowProfile(F y,F& v_fx,F& dvf_dy,F& d2vf_dy2);
+    F wrapX(F x) const;           // defined in .cpp
+    inline F periodicDx(F x1, int ix1, F x2, int ix2) const;
+    void renormalise();
+    void updateCellSizeFromParticles();
+
 };

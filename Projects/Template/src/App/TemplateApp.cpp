@@ -28,6 +28,8 @@ void TemplateApp::initializeSubApp() {
     app_camera.height = 1.5; //Change the distance from sim
     //Initialize particles
     sim.particles2D = sim.createRandomParticles2D();
+    for (auto &p : sim.particles2D) p.ix = 0;
+    reinitializeGlobalState();
 }
 
 void TemplateApp::makeConfigWindow() {
@@ -46,6 +48,7 @@ void TemplateApp::makeConfigWindow() {
 
     if (ImGui::Button("Reload Particles")) {
         sim.particles2D = sim.createRandomParticles2D();
+        for (auto &p : sim.particles2D) p.ix = 0;
         sim.insertParticlesIntoGrid();
         reinitializeGlobalState();
         breach = 0;
@@ -61,7 +64,7 @@ void TemplateApp::makeConfigWindow() {
 
     // Provide a few shape choices.
     static int shapeIndex = 0;
-    const char* shapes[] = {"Circle", "Square"};
+    const char* shapes[] = { "Circle", "Square", "Tunnel" };
 
     // ImGui Checkbox for toggling on/off.
     if (ImGui::Checkbox("Activate Scenario Object", &activateScenario)) {
@@ -80,12 +83,17 @@ void TemplateApp::makeConfigWindow() {
         // Use a lambda function for creating the scenario object.
         auto scenarioObjectCreation = [&]() {
             sim.scenarioObjects.clear();
-            if (shapeIndex == 0) {
-                // Create a Circle scenario object with 64 segments, radius 1.1, centered at the origin.
-                sim.scenarioObjects.push_back(std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f)));
-            } else {
-                // Create a Square scenario object with half-dimensions 1.1 and 0.9, centered at the origin.
-                sim.scenarioObjects.push_back(std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f)));
+            switch (shapeIndex) {
+                case 0:  sim.scenarioObjects.push_back(
+                            std::make_unique<Circle>(1.1f, 64,
+                                                    Vector3F(0,0,0)));        break;
+                case 1:  sim.scenarioObjects.push_back(
+                            std::make_unique<Square>(1.1f, 0.9f,
+                                                    Vector3F(0,0,0)));        break;
+                case 2:  sim.scenarioObjects.push_back(
+                            std::make_unique<Tunnel2D>( /*halfLen =*/ 2.0f,
+                                                        /*halfWid =*/ sim.L/2,
+                                                        Vector3F(0,0,0)));     break;
             }
         };
 
@@ -109,8 +117,9 @@ void TemplateApp::makeConfigWindow() {
             ImGui::InputDouble("Animation Distance", &sim.animationDistance, 0.1, 1.0, "%.1f");
         }
     }
-}
 
+
+}
 
 void TemplateApp::reinitializeGlobalState() {
     globalState_0 = sim.getGlobalState();
@@ -254,11 +263,10 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStep() {
 
     // Run one optimization step on the global state.
     auto status = optimization.step(globalState_0);
-
     // Update the simulation with the optimized state.
     sim.setGlobalState(simCopy.getGlobalState());
+    sim.renormalise();      
     sim.updateAuxiliaryStructures();
-    
     // Log the objective, gradient norm, and Hessian condition number.
     F currentObjective;
     optimization.objective_function(globalState_0, currentObjective);
@@ -335,6 +343,7 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
     }while (grad.norm() > dynamic_convergence_threshold && iter < maxIter);
     
     sim.setGlobalState(simCopy.getGlobalState());
+    sim.renormalise();      
     sim.updateAuxiliaryStructures();
     sim.updateEffectiveNeighborCountsFinal();
     sim.globalState_2 = sim.globalState_1;
@@ -433,6 +442,7 @@ void TemplateApp::getViewerData(std::vector<CRLViewerData>& viewer_data, CRLCame
     for (int i = 0; i < numParticles; i++) {
         const Particle2D& p = sim.particles2D[i];
         Vector3F center = p.pos;
+        center(0) = sim.wrapX(center(0));   // visual copy only
         F radius = p.radius;
 
         // Write the center vertex.

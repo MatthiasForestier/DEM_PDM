@@ -17,6 +17,7 @@ SplashScreenResult showSplashScreen() {
     result.numSimulations = 1;
     result.simulationTime = 5.0;
     result.animationStartTime = 6.0;
+    result.numParticles = 100;
     
     bool done = false;
 
@@ -85,6 +86,7 @@ SplashScreenResult showSplashScreen() {
             ImGui::InputInt("Epsilon Dynamic", &result.exponent_convergence_threshold);
             ImGui::Checkbox("Viscosity", &result.viscosity);
             ImGui::InputInt("Number of Simulations", &result.numSimulations);
+            ImGui::InputInt("Number of Particles", &result.numParticles);
             ImGui::InputDouble("Simulation Duration (s)", &result.simulationTime, 1.0, 5.0, "%.1f");
             ImGui::InputDouble("Animation Start (s)", &result.animationStartTime, 0.1, 1.0, "%.2f");
 

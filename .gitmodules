@@ -10,3 +10,9 @@
 [submodule "ThirdParty/mma"]
 	path = ThirdParty/mma
 	url = https://github.com/jdumas/mma
+[submodule "ThirdParty/ThirdParty/h5cpp"]
+	path = ThirdParty/ThirdParty/h5cpp
+	url = https://github.com/ess-dmsc/h5cpp
+[submodule "ThirdParty/h5cpp"]
+	path = ThirdParty/h5cpp
+	url = https://github.com/ess-dmsc/h5cpp

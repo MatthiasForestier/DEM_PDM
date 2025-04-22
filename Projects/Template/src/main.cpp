@@ -9,7 +9,7 @@ int main() {
 
     if (initParam.exportMode) {
         // Run export simulation and then exit.
-        exportSimulationBehavior(initParam);
+        exportSimulationForML(initParam);
         return 0;
     }
 

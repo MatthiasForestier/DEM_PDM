@@ -10,6 +10,7 @@ struct SplashScreenResult {
     int exponent_convergence_threshold;
     bool viscosity;            // Whether friction is enabled.
     int numSimulations;       // Number of simulation runs.
+    int numParticles;         // Number of particles in the simulation.
     double simulationTime;    // Duration (in seconds) for each simulation run.
     double animationStartTime;
     int scenarioShapeIndex = 0;

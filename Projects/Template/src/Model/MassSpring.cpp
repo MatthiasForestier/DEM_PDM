@@ -22,13 +22,65 @@ void Simulation::makeConfigMenu() {
     ImGui::InputInt("Number of Particles", &numParticles);
 
     // Particle-related parameters
+    //Circular particles
+    
     ImGui::InputDouble("Mean", &mean, 0.01, 0.05, "%.2f");
-    ImGui::InputDouble("Standard Deviation", &std, 0.01, 0.05, "%.2f");
+    ImGui::InputDouble("Standard Deviation", &std, 0.01, 0.05, "%.4f");
+
+    //Polygonal particles
+
+    //Ellipsoidal particles
+
+
+    // Physics-related parameters
     ImGui::InputDouble("Density", &density, 10.0, 100.0, "%.2f");
     ImGui::InputDouble("Boundary Overlap", &overlapParam, 10.0, 100.0, "%.2f");
     ImGui::InputDouble("Interaction Overlap", &interactionParam, 10.0, 100.0, "%.2f");
     ImGui::InputDouble("Viscosity Coefficient", &viscosity_coeff, 0.01, 0.05, "%.3f");
     ImGui::InputDouble("Sigma", &sigma, 0.01, 0.05, "%.3f");
+
+    // experiment selector
+    const char* expNames[] = { "Default", "Shear Flow" };
+    int expIdx = int(experiment);
+    if (ImGui::Combo("Experiment", &expIdx, expNames, IM_ARRAYSIZE(expNames))) {
+        experiment = Experiment(expIdx);
+        gravity    = (experiment==Experiment::ShearFlow)
+                    ? Vector3F::Zero()
+                    : Vector3F(0,1,0);
+    }
+    if (experiment==Experiment::ShearFlow) {
+        ImGui::Checkbox("Periodic X",   &periodicX);
+        ImGui::InputDouble("ν (drag)",    &fluidViscosity, 0.01f,0.1f,"%.3f");
+        ImGui::InputDouble("V₀ (max speed)", &V0,         0.1f,1.0f,"%.2f");
+        ImGui::InputDouble("L (half‑height)", &L,         0.1f,1.0f,"%.2f");
+    }
+    static double  prevL         = L;
+    static bool    prevPeriodic  = periodicX;
+
+    bool needRebuild = false;
+
+    if (experiment == Experiment::ShearFlow)
+    {
+        if (L != prevL)            { prevL = L;           needRebuild = true; }
+        if (periodicX != prevPeriodic)
+                                   { prevPeriodic = periodicX; needRebuild = true; }
+    }
+
+    if (needRebuild && !scenarioObjects.empty())
+    {
+        /* regenerate tunnel geometry (if one is present) */
+        if (auto* tun = dynamic_cast<Tunnel2D*>(scenarioObjects[0].get()))
+        {
+            tun->halfWidth = L * 0.5;     // our convention
+            tun->generateVertices();
+        }           
+
+        buildGridDataStructure();         // BB changed → new grid size
+        insertParticlesIntoGrid();        // refill the grid
+        renormalise();
+        updateNeighborLists();            // update neighbour caches
+    }
+
     // ImGui::InputDouble("Contact Bond Normal Stiffness", &contactBondNormalStiffness, 1.0, 5.0, "%.2f");
     // ImGui::InputDouble("Contact Stiffness Ratio", &contactStiffnessRatio, 0.01, 0.05, "%.2f");
     // ImGui::InputDouble("Interparticle Friction", &interparticleFriction, 0.01, 0.05, "%.2f");
@@ -64,12 +116,21 @@ void Simulation::makeConfigMenu() {
     // }
 }
 
+void Simulation::updateCellSizeFromParticles() {
+    maxParticleRadius = 0.0;
+    for (auto &p : particles2D)
+        maxParticleRadius = std::max(maxParticleRadius, p.radius);
+    // pick whatever factor keeps each disc safely within one neighbour cell
+    cellSize = 2.0 * maxParticleRadius;
+}
+
 void Simulation::buildGridDataStructure() 
 {
     if (scenarioObjects.empty()) {
     std::cerr << "No scenario objects defined in simulation.\n";
     return;
     }
+    updateCellSizeFromParticles();
     // Use the cached bounding box (BB) from the first scenario object.
     const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
     F factor = 1.1; // Add a small buffer around the BB.
@@ -91,93 +152,118 @@ void Simulation::buildGridDataStructure()
 // Now each particle is inserted into all cells that its circle overlaps.
 void Simulation::insertParticlesIntoGrid()
 {
-    // Clear any previous data in the grid.
-    for (auto &cell : grid) {
+    // 1) Clear all cells
+    for (auto &cell : grid)
         cell.clear();
-    }
 
-    // Loop over all Particle2D objects.
-    for (size_t i = 0; i < particles2D.size(); i++) {
+    // 2) Standard insertion (possibly wrapping in X)
+    for (I i = 0; i < (I)particles2D.size(); ++i) {
         const Particle2D &p = particles2D[i];
+        // compute world‐space AABB of this particle
+        F x0 = p.pos(0) - p.radius;
+        F x1 = p.pos(0) + p.radius;
+        F y0 = p.pos(1) - p.radius;
+        F y1 = p.pos(1) + p.radius;
 
-        // Compute the extent of the particle (its bounding box).
-        F xMinParticle = p.pos(0) - p.radius;
-        F xMaxParticle = p.pos(0) + p.radius;
-        F yMinParticle = p.pos(1) - p.radius;
-        F yMaxParticle = p.pos(1) + p.radius;
+        int minCX = (int)std::floor((x0 - minX) / cellSize);
+        int maxCX = (int)std::floor((x1 - minX) / cellSize);
+        int minCY = (int)std::floor((y0 - minY) / cellSize);
+        int maxCY = (int)std::floor((y1 - minY) / cellSize);
 
-        // Compute the grid cell range that covers this bounding box.
-        int minCellX = static_cast<int>(std::floor((xMinParticle - minX) / cellSize));
-        int maxCellX = static_cast<int>(std::floor((xMaxParticle - minX) / cellSize));
-        int minCellY = static_cast<int>(std::floor((yMinParticle - minY) / cellSize));
-        int maxCellY = static_cast<int>(std::floor((yMaxParticle - minY) / cellSize));
-
-        // Clamp indices to grid bounds.
-        minCellX = std::max(minCellX, 0);
-        maxCellX = std::min(maxCellX, numCellsX - 1);
-        minCellY = std::max(minCellY, 0);
-        maxCellY = std::min(maxCellY, numCellsY - 1);
-
-        // Insert the particle into each overlapping cell.
-        for (int cx = minCellX; cx <= maxCellX; cx++) {
-            for (int cy = minCellY; cy <= maxCellY; cy++) {
-                int index = cy * numCellsX + cx;
-                grid[index].push_back(static_cast<int>(i));
+        for (int cy = minCY; cy <= maxCY; ++cy) {
+            if (cy < 0 || cy >= numCellsY) continue;
+            for (int cxRaw = minCX; cxRaw <= maxCX; ++cxRaw) {
+                int cxWrapped;
+                if (periodicX) {
+                    // wrap X
+                    cxWrapped = ((cxRaw % numCellsX) + numCellsX) % numCellsX;
+                } else {
+                    if (cxRaw < 0 || cxRaw >= numCellsX) continue;
+                    cxWrapped = cxRaw;
+                }
+                grid[cy * numCellsX + cxWrapped].push_back(i);
             }
         }
     }
+
+    // 3) **Only if** we're in periodic‑X mode, merge the two edge columns
+    if (periodicX && numCellsX > 1) {
+        for (int cy = 0; cy < numCellsY; ++cy) {
+            int idxL = cy * numCellsX + 0;
+            int idxR = cy * numCellsX + (numCellsX - 1);
+
+            auto &leftCell  = grid[idxL];
+            auto &rightCell = grid[idxR];
+
+            // append right‐cell contents into left‐cell
+            leftCell.insert(leftCell.end(),
+                            rightCell.begin(),
+                            rightCell.end());
+
+            // (optional) keep symmetry so neighbor queries on the right edge see the same list
+            rightCell = leftCell;
+        }
+    }
 }
+
+
 
 void Simulation::updateNeighborLists()
 {
-    // Clear neighbor lists for all particles.
-    for (auto &p : particles2D) {
+    /* clear old lists */
+    for (auto& p : particles2D)
         p.neighborIndices.clear();
-    }
 
-    // Loop over each particle.
-    for (size_t i = 0; i < particles2D.size(); i++) {
-        Particle2D &p = particles2D[i];
+    /* constants */
+    const int W = numCellsX;                // horizontal cell count
 
-        // Compute the bounding cell range for particle p (using its full circle).
-        int minCellX = static_cast<int>(std::floor((p.pos(0) - p.radius - minX) / cellSize));
-        int maxCellX = static_cast<int>(std::floor((p.pos(0) + p.radius - minX) / cellSize));
-        int minCellY = static_cast<int>(std::floor((p.pos(1) - p.radius - minY) / cellSize));
-        int maxCellY = static_cast<int>(std::floor((p.pos(1) + p.radius - minY) / cellSize));
+    /* -------- one pass per particle -------- */
+    for (size_t i = 0; i < particles2D.size(); ++i)
+    {
+        Particle2D& p = particles2D[i];
 
-        // Clamp indices.
-        minCellX = std::max(minCellX, 0);
-        maxCellX = std::min(maxCellX, numCellsX - 1);
-        minCellY = std::max(minCellY, 0);
-        maxCellY = std::min(maxCellY, numCellsY - 1);
+        /* bounding box in *cell* coordinates – NOT clamped */
+        F cxWrapped  = periodicX ? wrapX(p.pos(0)) : p.pos(0);
+        int cxMinRaw = (int)std::floor((cxWrapped - p.radius - minX) / cellSize);
+        int cxMaxRaw = (int)std::floor((cxWrapped + p.radius - minX) / cellSize);
+        int cyMin    = std::max(0,  (int)std::floor((p.pos(1)-p.radius - minY)/cellSize));
+        int cyMax    = std::min(numCellsY-1,
+                                (int)std::floor((p.pos(1)+p.radius - minY)/cellSize));
 
-        // Use a set to avoid duplicate candidate neighbors.
-        std::unordered_set<int> neighborCandidates;
-        for (int cx = minCellX; cx <= maxCellX; cx++) {
-            for (int cy = minCellY; cy <= maxCellY; cy++) {
-                int gridIndex = cy * numCellsX + cx;
-                for (int j : grid[gridIndex]) {
-                    if (j != static_cast<int>(i)) { // avoid self
-                        neighborCandidates.insert(j);
-                    }
-                }
+        /* gather candidate indices (avoid duplicates with a set) */
+        std::unordered_set<int> cand;
+        for (int cy = cyMin; cy <= cyMax; ++cy)
+        {
+            for (int cxRaw = cxMinRaw; cxRaw <= cxMaxRaw; ++cxRaw)
+            {
+                int cx = cxRaw;
+
+                /* wrap or reject in X */
+                if (periodicX)
+                    cx = ((cx % W) + W) % W;          // modulo wrap
+                else if (cx < 0 || cx >= W)
+                    continue;                         // outside → skip
+
+                int g = cy * W + cx;                  // 1‑D cell index
+                for (int j : grid[g])
+                    if (j != (int)i) cand.insert(j);
             }
         }
 
-        // Check for actual overlap with each candidate.
-        for (int j : neighborCandidates) {
-            // To avoid duplicate symmetric entries, you can choose to only add if j > i.
-            if (j <= static_cast<int>(i)) continue;
-            const Particle2D &q = particles2D[j];
-            F dx = p.pos(0) - q.pos(0);
+        /* real‑overlap filtering (and symmetry) */
+        for (int j : cand)
+        {
+            if (j <= (int)i) continue;               // keep ≤ once
+            const Particle2D& q = particles2D[j];
+
+            F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
             F dy = p.pos(1) - q.pos(1);
-            F distance = std::sqrt(dx * dx + dy * dy);
-            if (distance < (p.radius + q.radius)) {
+            if (std::sqrt(dx*dx + dy*dy) < p.radius + q.radius)
                 p.neighborIndices.push_back(j);
-            }
         }
     }
 }
+
 
 void Simulation::updateGlobalPositions() {
     int n = 0;
@@ -204,11 +290,15 @@ void Simulation::applyGlobalPositions(const VectorXF &positions) {
             particles3D[i].pos = positions.segment<6>(6*i);
         }
     } else {
-        int n = static_cast<int>(particles2D.size());
-        for (int i = 0; i < n; i++) {
+        int n = (int)particles2D.size();
+        for (int i = 0; i < n; ++i) {
             particles2D[i].pos = positions.segment<3>(3*i);
+
+            if (periodicX)   // keep it canonical
+                particles2D[i].pos(0) = wrapX(particles2D[i].pos(0));
         }
     }
+    
 }
 
 VectorXF Simulation::getGlobalState() {
@@ -234,20 +324,20 @@ void Simulation::compute_energy(F &value) const {
         // Copy particle so that detectBoundaryCollision2D can update its state.
         Particle2D p = particles2D[i];
         detectBoundaryCollision2D(p);
-
-        // Check if at least one scenario object is available.
-        if (!scenarioObjects.empty()) {
-            // Use the bounding box from the first scenario object.
-            const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
-            F factor = 1.1; // Optional: apply a small buffer if needed.
-            // You can adjust the baseline using the bounding box. For instance:
-            F minYAdjusted = bbox.min_y; // Optionally, multiply by factor if required.
-            value += gravity(1) * (p.pos(1) - minYAdjusted); // Compute energy relative to minY.
-        } else {
-            // Fallback: compute gravitational energy without a scenario object.
-            value += gravity(1) * p.pos(1);
+        if (experiment == Experiment::Default){
+            // Check if at least one scenario object is available.
+            if (!scenarioObjects.empty()) {
+                // Use the bounding box from the first scenario object.
+                const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
+                F factor = 1.1; // Optional: apply a small buffer if needed.
+                // You can adjust the baseline using the bounding box. For instance:
+                F minYAdjusted = bbox.min_y; // Optionally, multiply by factor if required.
+                value += gravity(1) * (p.pos(1) - minYAdjusted); // Compute energy relative to minY.
+            } else {
+                // Fallback: compute gravitational energy without a scenario object.
+                value += gravity(1) * p.pos(1);
+            }
         }
-        
         if (p.BoundaryCollision == 1) {
             for (const auto &so : scenarioObjects) {
                 if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
@@ -301,8 +391,26 @@ void Simulation::compute_energy(F &value) const {
                     }
                 }
             }
+        } else if (p.BoundaryCollision == 3) {                    // ← NEW
+            for (const auto& so : scenarioObjects) {
+                if (auto* tun = dynamic_cast<Tunnel2D*>(so.get())) {
+                    F py     = p.pos(1);
+                    F r      = p.radius;
+                    F min_y  = tun->BB.min_y;
+                    F max_y  = tun->BB.max_y;
+    
+                    /* vertical penetration */
+                    F overlap = 0.0;
+                    if (py - r < min_y)       overlap = min_y - (py - r);
+                    else if (py + r > max_y)  overlap = (py + r) - max_y;
+    
+                    if (overlap > 0.0)
+                        value += 0.5 * overlapParam * overlap * overlap;
+                }
+            }
         }
-    }
+
+    } 
 
     // --- Interparticle overlap energy ---
     // Loop over each particle and its neighbor list.
@@ -311,7 +419,7 @@ void Simulation::compute_energy(F &value) const {
         for (int j : p.neighborIndices) {
             // Each neighbor index j is guaranteed to be > i (avoid duplicate work).
             const Particle2D &q = particles2D[j];
-            F dx = p.pos(0) - q.pos(0);
+            F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);   // <── single‑line change
             F dy = p.pos(1) - q.pos(1);
             F d = std::sqrt(dx * dx + dy * dy);
             // Compute overlap only if particles are close.
@@ -320,6 +428,13 @@ void Simulation::compute_energy(F &value) const {
                 value += 0.5 * interactionParam * overlap * overlap / (1 + overlap * overlap);
             }
         }
+    }
+
+    //Prevent rigid body motion
+    if (periodicX && !particles2D.empty())
+    {
+        F dx = particles2D[0].pos(0) - pinXref;
+        value += 0.5 * pinK * dx * dx;
     }
 }
 
@@ -332,12 +447,12 @@ void Simulation::compute_gradient(VectorXF &gradient) const {
     for (size_t i = 0; i < particles2D.size(); i++) {
         Particle2D p = particles2D[i];
         detectBoundaryCollision2D(p);
-
-        // Gravitational gradient: only affects the y-component.
-        gradient(3 * i)     = 0;
-        gradient(3 * i + 1) = gravity(1); //p.mass *
-        gradient(3 * i + 2) = 0;
-
+        if (experiment == Experiment::Default){
+            // Gravitational gradient: only affects the y-component.
+            gradient(3 * i)     = 0;
+            gradient(3 * i + 1) = gravity(1); //p.mass *
+            gradient(3 * i + 2) = 0;
+        }
         if (p.BoundaryCollision == 1) {
             for (const auto &so : scenarioObjects) {
                 if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
@@ -403,6 +518,20 @@ void Simulation::compute_gradient(VectorXF &gradient) const {
                     }
                 }
             }
+        } else if (p.BoundaryCollision == 3) {                    // ← NEW
+            for (const auto& so : scenarioObjects) {
+                if (auto* tun = dynamic_cast<Tunnel2D*>(so.get())) {
+                    F py     = p.pos(1);
+                    F r      = p.radius;
+                    F min_y  = tun->BB.min_y;
+                    F max_y  = tun->BB.max_y;
+    
+                    if (py - r < min_y)
+                        gradient(3*i + 1) += overlapParam * (-min_y + py - r);
+                    else if (py + r > max_y)
+                        gradient(3*i + 1) += overlapParam * (py - max_y + r);
+                }
+            }
         }
     }
 
@@ -412,7 +541,7 @@ void Simulation::compute_gradient(VectorXF &gradient) const {
         const Particle2D &p = particles2D[i];
         for (int j : p.neighborIndices) {
             const Particle2D &q = particles2D[j];
-            F dx = p.pos(0) - q.pos(0);
+            F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);   // <── single‑line change
             F dy = p.pos(1) - q.pos(1);
             F d = std::sqrt(dx * dx + dy * dy);
             const F eps = 1e-6; // or another appropriate threshold
@@ -429,6 +558,13 @@ void Simulation::compute_gradient(VectorXF &gradient) const {
                 gradient(3 * j + 1) += factor * dy;
             }
         }
+    }
+
+    //Prevent rigid body motion
+    if (periodicX && !particles2D.empty())
+    {
+        gradient(0) += pinK * (particles2D[0].pos(0) - pinXref);
+        /*  (only x‑dof of particle 0; no effect on y or θ)  */
     }
 }
 
@@ -514,6 +650,13 @@ void Simulation::compute_hessian(SparseMatrixF &hessian) const {
                     }
                 }
             }
+        } else if (p.BoundaryCollision == 3) {                    // ← NEW
+            for (const auto& so : scenarioObjects) {
+                if (dynamic_cast<Tunnel2D*>(so.get())) {
+                    /* same constant stiffness as square walls, but only in y */
+                    hessian.coeffRef(3*i + 1, 3*i + 1) += overlapParam;
+                }
+            }
         }
     }
 
@@ -523,7 +666,7 @@ void Simulation::compute_hessian(SparseMatrixF &hessian) const {
         const Particle2D &p = particles2D[i];
         for (int j : p.neighborIndices) {
             const Particle2D &q = particles2D[j];
-            F dx = p.pos(0) - q.pos(0);
+            F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);   // <── single‑line change
             F dy = p.pos(1) - q.pos(1);
             F d = std::sqrt(dx * dx + dy * dy);
             const F eps = 1e-6; // or another appropriate threshold
@@ -548,6 +691,10 @@ void Simulation::compute_hessian(SparseMatrixF &hessian) const {
             }
         }
     }
+
+    //Prevent rigid body motion
+    if (periodicX && !particles2D.empty())
+        hessian.coeffRef(0,0) += pinK;
 }
 
 void Simulation::compute_energy_dyn(F &value) {
@@ -574,6 +721,34 @@ void Simulation::compute_energy_dyn(F &value) {
             value += 0.5 * viscosity_coeff * effectiveCountFiltered / (timeStep * timeStep) * diff.squaredNorm();
         }
     }
+    if (experiment == Experiment::ShearFlow)
+    {
+        for (int i = 0; i < (int)particles2D.size(); ++i)
+        {
+            const int base = 3 * i;
+
+            /* current & previous positions */
+            F x1 = globalPositions(base    );
+            F y1 = globalPositions(base + 1);
+            F t1 = globalPositions(base + 2);
+            F x0 = globalState_1  (base    );
+            F y0 = globalState_1  (base + 1);
+            F t0 = globalState_1  (base + 2);
+
+            /* fluid velocity */
+            F vfx , dvf_dy , dummy;
+            shearFlowProfile(y1, vfx, dvf_dy, dummy);
+
+            /* particle velocity components */
+            F dvx = (x1 - x0)/timeStep - vfx;
+            F dvy = (y1 - y0)/timeStep;
+            F dvt = (t1 - t0)/timeStep;
+
+            value += 0.5 * fluidViscosity *
+                     (dvx*dvx + dvy*dvy + dvt*dvt);
+        }
+    }
+    
 }
 
 void Simulation::compute_gradient_dyn(VectorXF &gradient) {
@@ -597,6 +772,47 @@ void Simulation::compute_gradient_dyn(VectorXF &gradient) {
                                            globalState_1.segment(3 * i, 3));
         }
     }
+    if (experiment == Experiment::ShearFlow)
+    {
+        const F nu      = fluidViscosity;
+        const F inv_dt  = 1.0 / timeStep;
+        const F nu_over_dt  = nu * inv_dt;
+        const F nu_over_dt2 = nu * inv_dt * inv_dt;
+
+        for (int i = 0; i < (int)particles2D.size(); ++i)
+        {
+            const int base = 3 * i;
+
+            /* positions */
+            F x1 = globalPositions(base    );
+            F y1 = globalPositions(base + 1);
+            F t1 = globalPositions(base + 2);
+            F x0 = globalState_1  (base    );
+            F y0 = globalState_1  (base + 1);
+            F t0 = globalState_1  (base + 2);
+
+            /* fluid profile & derivative */
+            F vfx , dvf_dy , dummy;
+            shearFlowProfile(y1, vfx, dvf_dy, dummy);
+
+            /* velocity differences */
+            F dvx = (x1 - x0)*inv_dt - vfx;   // (v_p − v_f)_x
+            F dvy = (y1 - y0)*inv_dt;         // v_p,y
+            F dvt = (t1 - t0)*inv_dt;         // ω
+
+            // -------- grad_x --------
+            gradient(base) += nu_over_dt * dvx;
+
+            // -------- grad_y --------
+            gradient(base + 1) += nu_over_dt * dvy  // from v_p,y
+                                - nu * dvx * dvf_dy; // from v_f(y)
+
+            // -------- grad_theta ----
+            gradient(base + 2) += nu_over_dt * dvt;
+        }
+    }
+    
+    
 }
 
 void Simulation::compute_hessian_dyn(SparseMatrixF &hessian) {
@@ -617,28 +833,158 @@ void Simulation::compute_hessian_dyn(SparseMatrixF &hessian) {
             }
         }
     }
+    if (experiment == Experiment::ShearFlow)
+    {
+        const F nu       = fluidViscosity;
+        const F inv_dt   = 1.0 / timeStep;
+        const F nu_dt2   = nu * inv_dt * inv_dt;
+        const F k        = M_PI / L;           // π/L
+
+        for (int i = 0; i < (int)particles2D.size(); ++i)
+        {
+            const int base = 3 * i;
+
+            /* positions & velocities */
+            F x1 = globalPositions(base    );
+            F y1 = globalPositions(base + 1);
+            F x0 = globalState_1  (base    );
+
+            F sin_k_y , cos_k_y;
+            {
+                F vfx , dvf_dy , d2vf_dy2;
+                shearFlowProfile(y1, vfx, dvf_dy, d2vf_dy2);
+                sin_k_y = std::sin(k*y1);
+                cos_k_y = std::cos(k*y1);
+            }
+
+            /* pre‑compute   dvx   */
+            F dvx = (x1 - x0)*inv_dt - V0*sin_k_y;
+
+            /* ===== diagonal blocks ===== */
+            hessian.coeffRef(base    , base    ) += nu_dt2;   // d²E/dx²
+            hessian.coeffRef(base + 2, base + 2) += nu_dt2;   // d²E/dθ²
+
+            /* d²E/dy² :
+               nu_dt2  from v_p,y term
+             + nu * (V0 k)^2 * cos²(·)   from ∂dvx/∂y
+             + nu * dvx * V0 * k^2 * sin(·)   from ∂²v_f/∂y²
+            */
+            F term1 = nu_dt2;
+            F term2 = nu * (V0*V0) * k*k * cos_k_y*cos_k_y;
+            F term3 = nu * dvx * V0 * k*k * sin_k_y;
+            hessian.coeffRef(base + 1, base + 1) += term1 + term2 + term3;
+
+            /* ===== off‑diagonal  d²E/dxdy  (symmetric) =====
+               ∂grad_x/∂y = nu * (-V0 k cos) / dt
+            */
+            F off = -nu * V0 * k * cos_k_y * inv_dt;
+            hessian.coeffRef(base    , base + 1) += off;
+            hessian.coeffRef(base + 1, base    ) += off;
+        }
+    }
+    
+    
+}
+
+inline void Simulation::shearFlowProfile(F y,
+    F& v_fx,      //  sin(π y/L)
+    F& dvf_dy,    //  (π/L) cos(π y/L)
+    F& d2vf_dy2)  // −(π/L)^2 sin(π y/L)
+{
+    const F k = M_PI / L;            // π / L
+    v_fx     = V0 * std::sin(k * y);
+    F c      = std::cos(k * y);
+    F s      = std::sin(k * y);
+    dvf_dy   = V0 * k * c;
+    d2vf_dy2 = -V0 * k * k * s;
+}
+
+F Simulation::wrapX(F x) const {
+    const F W = maxX - minX;
+
+    // If the domain has not been initialised yet (W == 0)
+    // simply return the original coordinate to avoid Inf / NaN.
+    if (W == 0 || !periodicX)
+        return x;
+
+    return x - std::floor((x - minX) / W) * W;
+}
+
+inline F Simulation::periodicDx(F x1,int ix1, F x2,int ix2) const
+{
+    if (!periodicX) return x1 - x2;
+
+    const F W = maxX - minX;
+    if (W <= std::numeric_limits<F>::epsilon())
+        return x1 - x2;
+
+    /* true signed separation in the covering space */
+    F dx = (x1 - x2) + (F)(ix1 - ix2) * W;
+
+    /* wrap onto (‑½W , ½W]  –  round() gives the nearest integer */
+    dx -= std::round(dx / W) * W;
+    return dx;
+}
+
+void Simulation::renormalise()
+{
+    const F W = maxX - minX;
+
+    for (int i = 0; i < (int)particles2D.size(); ++i) {
+        auto &p = particles2D[i];
+
+        /* old wrap counter */
+        int old_ix = p.ix;
+
+        /* keep pos.x in [minX,maxX) and update p.ix */
+        while (p.pos(0) <  minX) { p.pos(0) += W; --p.ix; }
+        while (p.pos(0) >= maxX) { p.pos(0) -= W; ++p.ix; }
+
+        /* Δix since last frame */
+        int dix = p.ix - old_ix;
+        if (dix != 0) {
+            F shift = (F)dix * W;
+            globalState_1(3*i    ) += shift;
+            globalState_2(3*i    ) += shift;
+        }
+    }
 }
 
 void Simulation::updateEffectiveNeighborCounts() {
     // Loop over each particle.
     for (size_t i = 0; i < particles2D.size(); i++) {
         F rawEffectiveCount = 0;
-        // Compute the raw effective count using a soft kernel.
-        // Here we use: w(d) = 1 / (1 + (d/sigma)^2)
+
+        // Fetch mod‑position + wrap counter for convenience
+        const F xi   = globalPositions(3*i    );  // already ∈ [minX,maxX)
+        const int ixi = particles2D[i].ix;
+
+        // Compute the raw effective count using a soft kernel w(d) = exp(−d²/σ²)
         for (int j : particles2D[i].neighborIndices) {
-            VectorXF diffNeighbor = globalPositions.segment(3 * i, 3) - 
-                                      globalPositions.segment(3 * j, 3);
-            F d2 = diffNeighbor.squaredNorm();
-            rawEffectiveCount += std::exp(- d2 / (sigma * sigma));//1.0 / (1.0 + d2 / (sigma * sigma));
+            // x‑difference with correct periodic image
+            const F xj   = globalPositions(3*j    );
+            const int ixj = particles2D[j].ix;
+            F dx = periodicDx(xi, ixi, xj, ixj);
+
+            // y is non‑periodic
+            F dy = globalPositions(3*i + 1)
+                 - globalPositions(3*j + 1);
+
+            F d2 = dx*dx + dy*dy;  // ignore θ
+            rawEffectiveCount += std::exp(-d2 / (sigma * sigma));
         }
-        // Store the raw count.
+
+        // Store the raw count for this frame
         particles2D[i].effectiveCountCurrent = rawEffectiveCount;
         
-        // Apply temporal filtering:
-        // filtered = alpha * (current raw) + (1 - alpha) * (previous filtered)
-        F filteredCount = alpha * rawEffectiveCount + (1 - alpha) * particles2D[i].prevEffectiveCount;
-        // Optionally, clamp the value (for example, to a maximum of 1.0) to avoid stiffness.
+        // Temporal filtering
+        F filteredCount = alpha * rawEffectiveCount
+                        + (1 - alpha) * particles2D[i].prevEffectiveCount;
+        // Clamp to avoid runaway stiffness
         filteredCount = std::min(filteredCount, F(1.0));
+
+        // **Remember to write it back** so next frame can filter against it
+        particles2D[i].prevEffectiveCount = filteredCount;
     }
 }
 
@@ -646,27 +992,37 @@ void Simulation::updateEffectiveNeighborCountsFinal() {
     // Loop over each particle.
     for (size_t i = 0; i < particles2D.size(); i++) {
         F rawEffectiveCount = 0;
-        // Compute the raw effective count using a soft kernel.
-        // Here we use: w(d) = 1 / (1 + (d/sigma)^2)
+
+        // Cached mod‐position + wrap counter
+        const F  xi   = globalPositions(3*i    );  // ∈ [minX,maxX)
+        const int ixi = particles2D[i].ix;
+
+        // Soft‐kernel sum over neighbours
         for (int j : particles2D[i].neighborIndices) {
-            VectorXF diffNeighbor = globalPositions.segment(3 * i, 3) - 
-                                      globalPositions.segment(3 * j, 3);
-            F d2 = diffNeighbor.squaredNorm();
-            rawEffectiveCount +=  std::exp(- d2 / (sigma * sigma));//1.0 / (1.0 + d2 / (sigma * sigma));
+            const F  xj   = globalPositions(3*j    );
+            const int ixj = particles2D[j].ix;
+
+            F dx = periodicDx(xi, ixi, xj, ixj);
+            F dy = globalPositions(3*i + 1)
+                 - globalPositions(3*j + 1);
+
+            F d2 = dx*dx + dy*dy;
+            rawEffectiveCount += std::exp(-d2 / (sigma * sigma));
         }
-        // Store the raw count.
+
+        // Store the raw count
         particles2D[i].effectiveCountCurrent = rawEffectiveCount;
         
-        // Apply temporal filtering:
-        // filtered = alpha * (current raw) + (1 - alpha) * (previous filtered)
-        F filteredCount = alpha * rawEffectiveCount + (1 - alpha) * particles2D[i].prevEffectiveCount;
-        // Optionally, clamp the value (for example, to a maximum of 1.0) to avoid stiffness.
+        // Temporal filtering
+        F filteredCount = alpha * rawEffectiveCount
+                        + (1 - alpha) * particles2D[i].prevEffectiveCount;
         filteredCount = std::min(filteredCount, F(1.0));
-        
-        // Update the particle's stored filtered effective count.
+
+        // Write it back for the next frame
         particles2D[i].prevEffectiveCount = filteredCount;
     }
 }
+
 
 Particle2D::Particle2D(F radius, const Simulation& simParams)
     : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
@@ -690,58 +1046,82 @@ std::vector<Particle2D> Simulation::createRandomParticles2D() {
     std::vector<Particle2D> particles;
     particles.reserve(numParticles);
 
-    // Set up random number generators.
+    // ------------------------------------------------------------
+    // ❶  Find the area where we may drop particles
+    // ------------------------------------------------------------
+    F xMin = -0.8 , xMax = 0.8;          // ← fall‑back values
+    F yMin = -0.5 , yMax = 0.5;
+
+    if (!scenarioObjects.empty()) {
+        if (auto* tun = dynamic_cast<Tunnel2D*>(scenarioObjects[0].get())) {
+            const BoundingBox& BB = tun->getBoundingBox();
+            xMin = BB.min_x;
+            xMax = BB.max_x;
+            yMin = BB.min_y;
+            yMax = BB.max_y;
+        }
+    }
+
     std::random_device rd;
     std::mt19937 gen(rd());
+    std::normal_distribution<F> radiusDist(mean, std);   
+    std::uniform_real_distribution<F> distX(xMin, xMax);
 
-    // Uniform distributions for x and y coordinates within the display.
-    std::uniform_real_distribution<F> distX(-0.8, 0.8);
-    std::uniform_real_distribution<F> distY(-0.5, 0.5);
-
-    // Normal distribution for disk radii.
-    std::normal_distribution<F> radiusDist(mean, std); // mean 0.05, std 0.01
-
-    for (int i = 0; i < numParticles; i++) {
-        bool validCandidate = false;
+    // ------------------------------------------------------------
+    // ❷  Rejection sampling with exact periodic distance
+    // ------------------------------------------------------------
+    for (int i = 0; i < numParticles; ++i) {
+        bool ok = false;
         int attempts = 0;
-        Particle2D candidate(0.0, *this); // Use *this instead of 'sim'
+        Particle2D cand(0.0, *this);
+        cand.ix = 0;  // start in the base cell
 
-        // Try until we find a candidate that doesn't overlap or reach the maximum attempts.
-        while (!validCandidate && attempts < maxAttemptsPerParticle) {
-            attempts++;
+        while (!ok && attempts < maxAttemptsPerParticle) {
+            ++attempts;
 
-            // Generate a random radius and ensure it's positive.
-            F radius = radiusDist(gen);
-            if (radius <= 0)
-                radius = 0.01;
+            // sample radius
+            F r = std::max<F>(F(0.01), radiusDist(gen));
+            cand = Particle2D(r, *this);
+            cand.ix = 0;
 
-            // Create a candidate particle with the new radius.
-            candidate = Particle2D(radius, *this);
-            candidate.pos = Vector3F(distX(gen), distY(gen), 0.0);
+            // sample position in the fundamental domain
+            std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
+            cand.pos(0) = distX(gen);
+            cand.pos(1) = distY(gen);
+            cand.pos(2) = 0.0f;
 
-            // Check for overlap with all previously accepted particles.
-            validCandidate = true;
-            for (const auto &existing : particles) {
-                // Only the x and y coordinates are considered.
-                F distance = (candidate.pos.head(2) - existing.pos.head(2)).norm();
-                if (distance < (candidate.radius + existing.radius)) {
-                    validCandidate = false;
+            // enforce pos.x ∈ [xMin, xMax)
+            // (distX already does this, but just to be safe)
+            cand.pos(0) = std::clamp(cand.pos(0), xMin, std::nextafter(xMax, xMin));
+
+            // overlap test using the new 4‑arg periodicDx
+            ok = true;
+            for (auto& ex : particles) {
+                F dx = periodicDx(
+                    cand.pos(0), cand.ix,
+                    ex.pos(0),   ex.ix
+                );
+                F dy = cand.pos(1) - ex.pos(1);
+                F dist = std::sqrt(dx*dx + dy*dy);
+                if (dist < cand.radius + ex.radius) {
+                    ok = false;
                     break;
                 }
             }
         }
 
-        if (validCandidate) {
-            particles.push_back(candidate);
+        if (ok) {
+            particles.push_back(std::move(cand));
         } else {
-            std::cerr << "Warning: Could not place particle " << i + 1 << " without overlapping after "
-                      << maxAttemptsPerParticle << " attempts.\n";
-            // Optionally, break out of the loop if placement becomes too difficult.
+            std::cerr << "createRandomParticles2D: could not place particle "
+                      << (i+1) << " after " << maxAttemptsPerParticle << " tries.\n";
         }
     }
 
+    // All new particles have ix == 0 and pos.x in [xMin, xMax).
     return particles;
 }
+
 
 void Simulation::colorParticleRed(int particleID) {
     if (particleID < 0 || particleID >= static_cast<int>(particles2D.size())) {
@@ -884,3 +1264,38 @@ int Circle::detectCollision(const Particle2D &p) const {
     return 0;
 }
 
+Tunnel2D::Tunnel2D(F halfLen, F halfWid, const Vector3F& pos)
+    : halfWidth(halfWid), halfLength(halfLen)
+{
+    position = pos;
+    generateVertices();
+}
+
+void Tunnel2D::generateVertices()
+{
+    vertices.clear();
+
+    /* true physical Y–walls */
+    BB.min_y = position(1) - halfWidth;
+    BB.max_y = position(1) + halfWidth;
+
+    /* we expose an *artificially long* X span so the viewer can draw it.
+       It *doesn’t* constrain particles – X is handled by periodic wrapping
+       inside Simulation. */
+    BB.min_x = position(0) - halfLength;
+    BB.max_x = position(0) + halfLength;
+
+    /* rectangle mesh (purely visual) */
+    vertices.emplace_back(BB.min_x, BB.min_y, position(2));
+    vertices.emplace_back(BB.min_x, BB.max_y, position(2));
+    vertices.emplace_back(BB.max_x, BB.max_y, position(2));
+    vertices.emplace_back(BB.max_x, BB.min_y, position(2));
+}
+
+int Tunnel2D::detectCollision(const Particle2D& p) const
+{
+    /* only top / bottom walls act as barriers */
+    if (p.pos(1) - p.radius < BB.min_y || p.pos(1) + p.radius > BB.max_y)
+        return 3;                 // same collision code used by Square
+    return 0;
+}
