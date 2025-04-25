@@ -61,48 +61,6 @@ void Simulation::makeConfigMenu()
         scalarInput("Viscosity c"        , viscosityCoeff   , 0.01, "%.4f");
         scalarInput("Kernel sigma"           , kernelSigma      , 0.01, "%.4f");
     }
-
-    /* experiment type --------------------------------------------------- */
-    const char* expNames[] = { "Default", "Shear Flow" };
-    int choice = int(experiment);
-    if (ImGui::Combo("Experiment", &choice, expNames, IM_ARRAYSIZE(expNames)))
-    {
-        experiment = Experiment(choice);
-        gravity    = (experiment == Experiment::Default) ? Vec3(0,1,0) : Vec3::Zero();
-    }
-
-    /* shear-flow specific ------------------------------------------------ */
-    if (experiment == Experiment::ShearFlow)
-    {
-        ImGui::Checkbox("Periodic X", &periodicX);
-        scalarInput("nu (drag)"         , fluidViscosity, 0.01, "%.4f");
-        scalarInput("V0 (max speed)"   , V0            , 0.1 , "%.3f");
-        scalarInput("L (half height)"  , L             , 0.1 , "%.3f");
-    }
-
-    /* rebuild tunnel on size / BC change -------------------------------- */
-    static double lastL = L;   static bool lastPeriodic = periodicX;
-    bool rebuild = false;
-    if (experiment == Experiment::ShearFlow)
-    {
-        if (L != lastL)                   { lastL = L;            rebuild = true; }
-        if (periodicX != lastPeriodic)    { lastPeriodic = periodicX; rebuild = true; }
-    }
-
-    if (rebuild && !scenarioObjects.empty())
-    {
-        renormalise();
-        if (auto* tun = dynamic_cast<Tunnel2D*>(scenarioObjects.front().get()))
-        {
-            tun->halfWidth  = L * half;
-            tun->halfLength = L * half;
-            tun->generateVertices();
-        }
-        buildGridDataStructure();
-        insertParticlesIntoGrid();
-        renormalise();
-        updateNeighborLists();
-    }
 }
 
 /* ---------------------------------------------------------------------- */
