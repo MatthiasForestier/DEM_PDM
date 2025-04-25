@@ -1,151 +1,145 @@
 #include <igl/opengl/glfw/imgui/ImGuiHelpers.h>
 
 #include "Projects/Template/include/Model/MassSpring.h"
-
 #include "CRLHelper/MapleHelper.h"
 
-#include <iostream>
-#include <random>   
-#include <cmath>
+#include <Eigen/Core>
+#include <Eigen/Sparse>
 #include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <random>
 #include <unordered_set>
 
+/* ------------------------------------------------------------------ */
+/*  Local helpers / constants                                          */
+/* ------------------------------------------------------------------ */
+namespace {
 
-void Simulation::makeConfigMenu() {
-    // World parameters
-    ImGui::InputDouble("Time Step", &timeStep, 1e-5, 1e-4, "%.6f");
+using Vec2  = Eigen::Matrix<F,2,1>;
+using Vec3  = Eigen::Matrix<F,3,1>;
+using Trip  = Eigen::Triplet<F>;
 
-    // Gravity (Vector3F)
-    ImGui::InputDouble("Gravity", &gravity(1), 0.1, 0.5, "%.2f");
+inline F cube(F x)                   { return x * x * x; }
+constexpr F oneThird   = static_cast<F>(1.0 / 3.0);
+constexpr F half       = static_cast<F>(0.5);
+constexpr F two        = static_cast<F>(2.0);
+constexpr F tiny       = static_cast<F>(1e-12);
 
-    // Number of particles
-    ImGui::InputInt("Number of Particles", &numParticles);
+/* uniform wrapper for ImGui scalar inputs -------------------------------- */
+void scalarInput(const char* label, F& var, F step, const char* fmt = "%.3f")
+{ ImGui::InputDouble(label, &var, step, step*5, fmt); }
 
-    // Particle-related parameters
-    //Circular particles
-    
-    ImGui::InputDouble("Mean", &mean, 0.01, 0.05, "%.2f");
-    ImGui::InputDouble("Standard Deviation", &std, 0.01, 0.05, "%.4f");
+} // anonymous namespace
 
-    //Polygonal particles
+/* ---------------------------------------------------------------------- */
+/*  CONFIG MENU                                                           */
+/* ---------------------------------------------------------------------- */
+void Simulation::makeConfigMenu()
+{
+    /* world ------------------------------------------------------------- */
+    if (ImGui::CollapsingHeader("Solver / World"))
+    {
+        scalarInput("dt (time step)", timeStep, 1e-5, "%.6f");
+        scalarInput("Gravity y"      , gravity(1), 0.1, "%.2f");
+    }
 
-    //Ellipsoidal particles
+    /* particles --------------------------------------------------------- */
+    if (ImGui::CollapsingHeader("Particles"))
+    {
+        ImGui::InputInt("Count", &numParticles);
+        scalarInput("Radius mean", radiusMean, 0.01, "%.3f");
+        scalarInput("Radius std", radiusStd , 0.01, "%.4f");
+    }
 
+    /* contact / material ----------------------------------------------- */
+    if (ImGui::CollapsingHeader("Material & Contact"))
+    {
+        scalarInput("Density"          , density          , 10.0);
+        scalarInput("Wall stiff k"       , overlapParam     , 10.0);
+        scalarInput("Particle stiff k"   , interactionParam , 10.0);
+        scalarInput("Viscosity c"        , viscosityCoeff   , 0.01, "%.4f");
+        scalarInput("Kernel sigma"           , kernelSigma      , 0.01, "%.4f");
+    }
 
-    // Physics-related parameters
-    ImGui::InputDouble("Density", &density, 10.0, 100.0, "%.2f");
-    ImGui::InputDouble("Boundary Overlap", &overlapParam, 10.0, 100.0, "%.2f");
-    ImGui::InputDouble("Interaction Overlap", &interactionParam, 10.0, 100.0, "%.2f");
-    ImGui::InputDouble("Viscosity Coefficient", &viscosity_coeff, 0.01, 0.05, "%.3f");
-    ImGui::InputDouble("Sigma", &sigma, 0.01, 0.05, "%.3f");
-
-    // experiment selector
+    /* experiment type --------------------------------------------------- */
     const char* expNames[] = { "Default", "Shear Flow" };
-    int expIdx = int(experiment);
-    if (ImGui::Combo("Experiment", &expIdx, expNames, IM_ARRAYSIZE(expNames))) {
-        experiment = Experiment(expIdx);
-        gravity    = (experiment==Experiment::ShearFlow)
-                    ? Vector3F::Zero()
-                    : Vector3F(0,1,0);
+    int choice = int(experiment);
+    if (ImGui::Combo("Experiment", &choice, expNames, IM_ARRAYSIZE(expNames)))
+    {
+        experiment = Experiment(choice);
+        gravity    = (experiment == Experiment::Default) ? Vec3(0,1,0) : Vec3::Zero();
     }
-    if (experiment==Experiment::ShearFlow) {
-        ImGui::Checkbox("Periodic X",   &periodicX);
-        ImGui::InputDouble("ν (drag)",    &fluidViscosity, 0.01f,0.1f,"%.3f");
-        ImGui::InputDouble("V₀ (max speed)", &V0,         0.1f,1.0f,"%.2f");
-        ImGui::InputDouble("L (half‑height)", &L,         0.1f,1.0f,"%.2f");
-    }
-    static double  prevL         = L;
-    static bool    prevPeriodic  = periodicX;
 
-    bool needRebuild = false;
-
+    /* shear-flow specific ------------------------------------------------ */
     if (experiment == Experiment::ShearFlow)
     {
-        if (L != prevL)            { prevL = L;           needRebuild = true; }
-        if (periodicX != prevPeriodic)
-                                   { prevPeriodic = periodicX; needRebuild = true; }
+        ImGui::Checkbox("Periodic X", &periodicX);
+        scalarInput("nu (drag)"         , fluidViscosity, 0.01, "%.4f");
+        scalarInput("V0 (max speed)"   , V0            , 0.1 , "%.3f");
+        scalarInput("L (half height)"  , L             , 0.1 , "%.3f");
     }
 
-    if (needRebuild && !scenarioObjects.empty())
+    /* rebuild tunnel on size / BC change -------------------------------- */
+    static double lastL = L;   static bool lastPeriodic = periodicX;
+    bool rebuild = false;
+    if (experiment == Experiment::ShearFlow)
     {
-        /* regenerate tunnel geometry (if one is present) */
-        if (auto* tun = dynamic_cast<Tunnel2D*>(scenarioObjects[0].get()))
-        {
-            tun->halfWidth = L * 0.5;     // our convention
-            tun->generateVertices();
-        }           
+        if (L != lastL)                   { lastL = L;            rebuild = true; }
+        if (periodicX != lastPeriodic)    { lastPeriodic = periodicX; rebuild = true; }
+    }
 
-        buildGridDataStructure();         // BB changed → new grid size
-        insertParticlesIntoGrid();        // refill the grid
+    if (rebuild && !scenarioObjects.empty())
+    {
         renormalise();
-        updateNeighborLists();            // update neighbour caches
+        if (auto* tun = dynamic_cast<Tunnel2D*>(scenarioObjects.front().get()))
+        {
+            tun->halfWidth  = L * half;
+            tun->halfLength = L * half;
+            tun->generateVertices();
+        }
+        buildGridDataStructure();
+        insertParticlesIntoGrid();
+        renormalise();
+        updateNeighborLists();
     }
-
-    // ImGui::InputDouble("Contact Bond Normal Stiffness", &contactBondNormalStiffness, 1.0, 5.0, "%.2f");
-    // ImGui::InputDouble("Contact Stiffness Ratio", &contactStiffnessRatio, 0.01, 0.05, "%.2f");
-    // ImGui::InputDouble("Interparticle Friction", &interparticleFriction, 0.01, 0.05, "%.2f");
-    // ImGui::InputDouble("Contact Bond Normal Strength", &contactBondNormalStrength, 1.0, 5.0, "%.2f");
-    // ImGui::InputDouble("Contact Bond Shear Strength", &contactBondShearStrength, 1.0, 5.0, "%.2f");
-    // ImGui::InputDouble("Particle Wall Contact Normal Stiffness", &particleWallContactNormalStiffness, 1.0, 5.0, "%.2f");
-    // ImGui::InputDouble("Particle Wall Contact Tangential Stiffness", &particleWallContactTangentialStiffness, 1.0, 5.0, "%.2f");
-    // ImGui::InputDouble("Particle Wall Friction", &particleWallFriction, 0.01, 0.05, "%.2f");
-    // ImGui::InputDouble("Translational Damping", &translationalDamping, 0.01, 0.05, "%.2f");
-    // ImGui::InputDouble("Rotational Damping", &rotationalDamping, 0.01, 0.05, "%.2f");
-    // ImGui::InputDouble("Young's Modulus Min", &youngsModulusMin, 1e9, 1e10, "%.2e");
-    // ImGui::InputDouble("Young's Modulus Max", &youngsModulusMax, 1e9, 1e10, "%.2e");
-    // ImGui::InputDouble("Loading Velocity", &loadingVelocity, 0.01, 0.05, "%.2f");
-
-    // Static labels for display.
-    // static const std::vector<const char*> poissonChoiceLabels = {"0.05", "0.15", "0.25", "0.35", "0.45"};
-
-    // Determine the current index based on sim.poissonRatio and sim.poissonChoices.
-    // int currentIndex = 0;
-    // for (int i = 0; i < poissonChoices.size(); i++) {
-    //     if (std::abs(poissonChoices(i) - poissonRatio) < 1e-6) {
-    //         currentIndex = i;
-    //         break;
-    //     }
-    // }
-
-    // Create a single combo box for Poisson Ratio.
-    // if (ImGui::Combo("Poisson Ratio", &currentIndex,
-    //                  poissonChoiceLabels.data(),
-    //                  static_cast<int>(poissonChoices.size()))) {
-    //     // Update the simulation's poissonRatio based on the selected index.
-    //     poissonRatio = poissonChoices(currentIndex);
-    // }
 }
 
-void Simulation::updateCellSizeFromParticles() {
-    maxParticleRadius = 0.0;
-    for (auto &p : particles2D)
-        maxParticleRadius = std::max(maxParticleRadius, p.radius);
-    // pick whatever factor keeps each disc safely within one neighbour cell
-    cellSize = 2.0 * maxParticleRadius;
-}
-
-void Simulation::buildGridDataStructure() 
+/* ---------------------------------------------------------------------- */
+/*  GRID / NEIGHBOUR STRUCTURES                                           */
+/* ---------------------------------------------------------------------- */
+void Simulation::updateCellSizeFromParticles()
 {
-    if (scenarioObjects.empty()) {
-    std::cerr << "No scenario objects defined in simulation.\n";
-    return;
+    maxParticleRadius = F(0);
+    for (auto& p : particles2D) maxParticleRadius = std::max(maxParticleRadius, p.radius);
+    cellSize = two * maxParticleRadius;
+}
+
+void Simulation::buildGridDataStructure()
+{
+    if (scenarioObjects.empty())
+    {
+        std::cerr << "[Grid] No scenario objects – grid not built.\n";
+        return;
     }
+
     updateCellSizeFromParticles();
-    // Use the cached bounding box (BB) from the first scenario object.
-    const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
-    F factor = 1.1; // Add a small buffer around the BB.
-    minX = bbox.min_x; // * factor;
-    maxX = bbox.max_x; // * factor;
-    minY = bbox.min_y; // * factor;
-    maxY = bbox.max_y; // * factor;
 
-    // Compute the number of cells along each axis.
-    numCellsX = static_cast<int>(std::ceil((maxX - minX) / cellSize));
-    numCellsY = static_cast<int>(std::ceil((maxY - minY) / cellSize));
+    const BoundingBox& bb = scenarioObjects.front()->getBoundingBox();
+    minX = bb.min_x; maxX = bb.max_x;
+    minY = bb.min_y; maxY = bb.max_y;
 
-    // Resize the grid vector to hold all cells.
-    grid.clear();
-    grid.resize(numCellsX * numCellsY);
+    numCellsX = int(std::ceil((maxX-minX)/cellSize));
+    numCellsY = int(std::ceil((maxY-minY)/cellSize));
+
+    grid.assign(numCellsX * numCellsY, {});
+}
+
+void Simulation::minParticles() {
+    for (auto &p : particles2D)
+        minParticleDiam = std::min(minParticleDiam, p.radius);
+    // pick whatever factor keeps each disc safely within one neighbour cell
+    minParticleDiam = 2*minParticleDiam;
 }
 
 // Updated: Insert Particle2D objects into the grid.
@@ -244,8 +238,8 @@ void Simulation::updateNeighborLists()
                 else if (cx < 0 || cx >= W)
                     continue;                         // outside → skip
 
-                int g = cy * W + cx;                  // 1‑D cell index
-                for (int j : grid[g])
+                int gradient = cy * W + cx;                  // 1‑D cell index
+                for (int j : grid[gradient])
                     if (j != (int)i) cand.insert(j);
             }
         }
@@ -269,15 +263,15 @@ void Simulation::updateGlobalPositions() {
     int n = 0;
     if (use3D) {
         n = static_cast<int>(particles3D.size());
-        globalPositions.resize(6 * n);
+        globalPositions.resize(DOF_FULL * n);
         for (int i = 0; i < n; i++) {
-            globalPositions.segment<6>(6*i) = particles3D[i].pos;
+            globalPositions.segment<DOF_FULL>(DOF_FULL*i) = particles3D[i].pos;
         }
     }else{
         n = static_cast<int>(particles2D.size());
-        globalPositions.resize(3 * n);
+        globalPositions.resize(DOF * n);
         for (int i = 0; i < n; i++) {
-            globalPositions.segment<3>(3*i) = particles2D[i].pos;
+            globalPositions.segment<DOF>(DOF*i) = particles2D[i].pos;
         }
     }
 }
@@ -287,12 +281,12 @@ void Simulation::applyGlobalPositions(const VectorXF &positions) {
     if (use3D) {
         int n = static_cast<int>(particles3D.size());
         for (int i = 0; i < n; i++) {
-            particles3D[i].pos = positions.segment<6>(6*i);
+            particles3D[i].pos = positions.segment<DOF_FULL>(DOF_FULL*i);
         }
     } else {
         int n = (int)particles2D.size();
         for (int i = 0; i < n; ++i) {
-            particles2D[i].pos = positions.segment<3>(3*i);
+            particles2D[i].pos = positions.segment<DOF>(DOF*i);
 
             if (periodicX)   // keep it canonical
                 particles2D[i].pos(0) = wrapX(particles2D[i].pos(0));
@@ -309,6 +303,7 @@ VectorXF Simulation::getGlobalState() {
 void Simulation::setGlobalState(const VectorXF &state) {
     globalPositions = state;
     applyGlobalPositions(globalPositions);
+    // renormalise(); 
 }
 
 void Simulation::updateAuxiliaryStructures() {
@@ -317,423 +312,483 @@ void Simulation::updateAuxiliaryStructures() {
     updateNeighborLists();
 }
 
-void Simulation::compute_energy(F &value) const {
-    value = 0;
-    // First, add gravitational and boundary collision energy contributions.
-    for (size_t i = 0; i < particles2D.size(); i++) {
-        // Copy particle so that detectBoundaryCollision2D can update its state.
-        Particle2D p = particles2D[i];
+/* -------------------------------------------------------------------------- */
+/*  ENERGY                                                                    */
+/* -------------------------------------------------------------------------- */
+void Simulation::compute_energy(F &value) const
+{
+    value = F(0);
+
+    for (std::size_t ii = 0; ii < particles2D.size(); ++ii)
+    {
+        /* ------------------------------------------------------------------ */
+        /*  particle → local copy (for collision tagging)                     */
+        /* ------------------------------------------------------------------ */
+        Particle2D p = particles2D[ii];
         detectBoundaryCollision2D(p);
-        if (experiment == Experiment::Default){
-            // Check if at least one scenario object is available.
-            if (!scenarioObjects.empty()) {
-                // Use the bounding box from the first scenario object.
-                const BoundingBox &bbox = scenarioObjects[0]->getBoundingBox();
-                F factor = 1.1; // Optional: apply a small buffer if needed.
-                // You can adjust the baseline using the bounding box. For instance:
-                F minYAdjusted = bbox.min_y; // Optionally, multiply by factor if required.
-                value += gravity(1) * (p.pos(1) - minYAdjusted); // Compute energy relative to minY.
-            } else {
-                // Fallback: compute gravitational energy without a scenario object.
-                value += gravity(1) * p.pos(1);
-            }
-        }
-        if (p.BoundaryCollision == 1) {
-            for (const auto &so : scenarioObjects) {
-                if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
-                    F px = p.pos(0);
-                    F py = p.pos(1);
-                    F radius = p.radius;
-                    F Rb = circle->radius;
-                    F so_x = so->position(0);
-                    F so_y = so->position(1);
-                    // Distance between particle and circle center.
-                    F dx = px - so_x;
-                    F dy = py - so_y;
-                    F dist = std::sqrt(dx * dx + dy * dy);
-                    // Penetration offset (here simplified as the particle radius minus the circle radius)
-                    F delta = radius - Rb;
-                    // Penalty energy contribution.
-                    value += 0.5 * overlapParam * (dist + delta) * (dist + delta);
-                }
-            }
-        } else if (p.BoundaryCollision == 2) {
-            for (const auto &so : scenarioObjects) {
-                if (Square* square = dynamic_cast<Square*>(so.get())) {
-                    F px = p.pos(0);
-                    F py = p.pos(1);
-                    F radius = p.radius;
 
-                    F min_x = square->min_x;
-                    F max_x = square->max_x;
-                    F min_y = square->min_y;
-                    F max_y = square->max_y;
+        /* ---------------- gravitational potential ------------------------- */
+        if (experiment == Experiment::Default)
+        {
+            const F y0 = scenarioObjects.empty()
+                        ? F(0)                       /* fallback datum       */
+                        : scenarioObjects[0]->getBoundingBox().min_y;
 
-                    F overlap_x_r = 0, overlap_x_l = 0;
-                    if (px - radius < min_x) {
-                        overlap_x_l = min_x - (px - radius);
-                    } else if (px + radius > max_x) {
-                        overlap_x_r = (px + radius) - max_x;
-                    }
-                    F overlap_y_b = 0, overlap_y_t = 0;
-                    if (py - radius < min_y) {
-                        overlap_y_b = min_y - (py - radius);
-                    } else if (py + radius > max_y) {
-                        overlap_y_t = (py + radius) - max_y;
-                    }
-                    // Total overlap computed as the Euclidean norm of the directional overlaps.
-                    F total_overlap = std::sqrt(overlap_x_l * overlap_x_l +
-                                                overlap_y_t * overlap_y_t +
-                                                overlap_x_r * overlap_x_r +
-                                                overlap_y_b * overlap_y_b);
-                    if (total_overlap > 0) {
-                        value += 0.5 * overlapParam * total_overlap * total_overlap;
-                    }
-                }
-            }
-        } else if (p.BoundaryCollision == 3) {                    // ← NEW
-            for (const auto& so : scenarioObjects) {
-                if (auto* tun = dynamic_cast<Tunnel2D*>(so.get())) {
-                    F py     = p.pos(1);
-                    F r      = p.radius;
-                    F min_y  = tun->BB.min_y;
-                    F max_y  = tun->BB.max_y;
-    
-                    /* vertical penetration */
-                    F overlap = 0.0;
-                    if (py - r < min_y)       overlap = min_y - (py - r);
-                    else if (py + r > max_y)  overlap = (py + r) - max_y;
-    
-                    if (overlap > 0.0)
-                        value += 0.5 * overlapParam * overlap * overlap;
-                }
-            }
+            const F mgy = (dynamic ? p.mass : F(1)) * gravity(1)
+                        * (p.pos(1) - y0);
+
+            value += mgy;
         }
 
-    } 
+        /* -------------------- boundary objects --------------------------- */
+        if (p.BoundaryCollision == 1)                       /* CIRCLE wall  */
+        {
+            const F px = p.pos(0),  py = p.pos(1),  r = p.radius;
 
-    // --- Interparticle overlap energy ---
-    // Loop over each particle and its neighbor list.
-    for (size_t i = 0; i < particles2D.size(); i++) {
-        const Particle2D &p = particles2D[i];
-        for (int j : p.neighborIndices) {
-            // Each neighbor index j is guaranteed to be > i (avoid duplicate work).
-            const Particle2D &q = particles2D[j];
-            F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);   // <── single‑line change
-            F dy = p.pos(1) - q.pos(1);
-            F d = std::sqrt(dx * dx + dy * dy);
-            // Compute overlap only if particles are close.
-            F overlap = (p.radius + q.radius) - d;
-            if (overlap > 0) {
-                value += 0.5 * interactionParam * overlap * overlap / (1 + overlap * overlap);
-            }
+            for (const auto &so : scenarioObjects)
+                if (auto *c = dynamic_cast<Circle*>(so.get()))
+                {
+                    const F dx   = px - c->position(0);
+                    const F dy   = py - c->position(1);
+                    const F dist = std::sqrt(dx*dx + dy*dy);
+
+                    F depth = dist + r - c->radius;          // δ
+                    if (depth <= F(0)) continue;
+
+                    value += oneThird * overlapParam * cube(depth);
+                }
+        }
+        else if (p.BoundaryCollision == 2)                   /* SQUARE wall */
+        {
+            const F px = p.pos(0),  py = p.pos(1),  r = p.radius;
+
+            for (const auto &so : scenarioObjects)
+                if (auto *sq = dynamic_cast<Square*>(so.get()))
+                {
+                    /* face–wise overlaps (δ ≥ 0) -------------------------- */
+                    const F δxL = sq->min_x - (px - r);
+                    const F δxR = (px + r) - sq->max_x;
+                    const F δyB = sq->min_y - (py - r);
+                    const F δyT = (py + r) - sq->max_y;
+
+                    const F δx = (δxR > 0 ? δxR : (δxL > 0 ? δxL : F(0)));
+                    const F δy = (δyT > 0 ? δyT : (δyB > 0 ? δyB : F(0)));
+
+                    if (δx==0 && δy==0) continue;
+
+                    /* single face  →  δ = n    (because n=δ)               */
+                    /* corner       →  n = √(δx²+δy²)                       */
+                    const F n = std::sqrt(δx*δx + δy*δy);
+
+                    value += oneThird * overlapParam * cube(n);
+                }
+        }
+        else if (p.BoundaryCollision == 3)                   /* TUNNEL top/bot */
+        {
+            const F py = p.pos(1),  r = p.radius;
+
+            for (const auto &so : scenarioObjects)
+                if (auto *tu = dynamic_cast<Tunnel2D*>(so.get()))
+                {
+                    F δ = F(0);
+                    if (py - r < tu->BB.min_y)       δ = tu->BB.min_y - (py - r);
+                    else if (py + r > tu->BB.max_y)  δ = (py + r) - tu->BB.max_y;
+
+                    if (δ > 0)
+                        value += oneThird * overlapParam * cube(δ);
+                }
         }
     }
 
-    //Prevent rigid body motion
+    /* ------------------- inter–particle contacts ------------------------- */
+    for (std::size_t i = 0; i < particles2D.size(); ++i)
+    {
+        const Particle2D &p = particles2D[i];
+
+        for (int j : p.neighborIndices)           /* j > i by construction */
+        {
+            const Particle2D &q = particles2D[j];
+
+            /* periodic dx so cell lists work                                    */
+            const F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
+            const F dy = p.pos(1) - q.pos(1);
+            const F d  = std::sqrt(dx*dx + dy*dy);
+
+            const F δ = (p.radius + q.radius) - d;         /* overlap */
+            if (δ <= F(0)) continue;
+
+            value += oneThird * interactionParam * cube(δ);
+        }
+    }
+
+    /* ------------- pin spring (prevent rigid motion) -------------------- */
     if (periodicX && !particles2D.empty())
     {
-        F dx = particles2D[0].pos(0) - pinXref;
-        value += 0.5 * pinK * dx * dx;
+        const F dx0 = particles2D[0].pos(0) - pinXref;
+        value += F(0.5) * pinK * dx0 * dx0;
     }
 }
 
-void Simulation::compute_gradient(VectorXF &gradient) const {
-    // Global state has 3 entries per particle: [x, y, theta]
-    gradient.resize(3 * particles2D.size());
-    gradient.setZero();
+/* -------------------------------------------------------------------------- */
+/*  GRADIENT                                                                  */
+/* -------------------------------------------------------------------------- */
+void Simulation::compute_gradient(VectorXF &g) const
+{
+    g.resize(DOF * particles2D.size());
+    g.setZero(); 
 
-    // First, add gravitational and boundary collision gradient contributions.
-    for (size_t i = 0; i < particles2D.size(); i++) {
-        Particle2D p = particles2D[i];
-        detectBoundaryCollision2D(p);
-        if (experiment == Experiment::Default){
-            // Gravitational gradient: only affects the y-component.
-            gradient(3 * i)     = 0;
-            gradient(3 * i + 1) = gravity(1); //p.mass *
-            gradient(3 * i + 2) = 0;
-        }
-        if (p.BoundaryCollision == 1) {
-            for (const auto &so : scenarioObjects) {
-                if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
-                    F px = p.pos(0);
-                    F py = p.pos(1);
-                    F boundaryRadius = circle->radius;
-                    F so_x = so->position(0);
-                    F so_y = so->position(1);
-                    
-                    // Penetration depth.
-                    F penetration = (p.radius - boundaryRadius);
-                    F stiffness = overlapParam;
-                    
-                    F dx = px - so_x;
-                    F dy = py - so_y;
-                    F dist = std::sqrt(dx * dx + dy * dy);
-                    if (dist == 0) continue;
-                    // The gradient contribution (simplified).
-                    F factor = stiffness * penetration / dist;
-                    gradient(3 * i)     += dx * factor + dx * stiffness;
-                    gradient(3 * i + 1) += dy * factor + dy * stiffness;
-                }
-            }
-        } else if (p.BoundaryCollision == 2) {
-            for (const auto &so : scenarioObjects) {
-                if (Square* square = dynamic_cast<Square*>(so.get())) {
-                    F px = p.pos(0);
-                    F py = p.pos(1);
-                    F radius = p.radius;
-
-                    F min_x = square->min_x;
-                    F max_x = square->max_x;
-                    F min_y = square->min_y;
-                    F max_y = square->max_y;
-
-                    F overlap_x_r = 0, overlap_x_l = 0;
-                    if (px - radius < min_x) {
-                        overlap_x_l = min_x - (px - radius);
-                    } else if (px + radius > max_x) {
-                        overlap_x_r = (px + radius) - max_x;
-                    }
-                    F overlap_y_b = 0, overlap_y_t = 0;
-                    if (py - radius < min_y) {
-                        overlap_y_b = min_y - (py - radius);
-                    } else if (py + radius > max_y) {
-                        overlap_y_t = (py + radius) - max_y;
-                    }
-                    F total_overlap = std::sqrt(overlap_x_l * overlap_x_l +
-                                                overlap_y_t * overlap_y_t +
-                                                overlap_x_r * overlap_x_r +
-                                                overlap_y_b * overlap_y_b);
-                    if (total_overlap > 0) {
-                        if (overlap_x_l > 0) {
-                            gradient(3 * i) += overlapParam * (-min_x + px - radius);
-                        } else if (overlap_x_r > 0) {
-                            gradient(3 * i) += overlapParam * (px - max_x + radius);
-                        }
-                        if (overlap_y_b > 0) {
-                            gradient(3 * i + 1) += overlapParam * (-min_y + py - radius);
-                        } else if (overlap_y_t > 0) {
-                            gradient(3 * i + 1) +=  overlapParam * (py - max_y + radius);
-                        }
-                    }
-                }
-            }
-        } else if (p.BoundaryCollision == 3) {                    // ← NEW
-            for (const auto& so : scenarioObjects) {
-                if (auto* tun = dynamic_cast<Tunnel2D*>(so.get())) {
-                    F py     = p.pos(1);
-                    F r      = p.radius;
-                    F min_y  = tun->BB.min_y;
-                    F max_y  = tun->BB.max_y;
-    
-                    if (py - r < min_y)
-                        gradient(3*i + 1) += overlapParam * (-min_y + py - r);
-                    else if (py + r > max_y)
-                        gradient(3*i + 1) += overlapParam * (py - max_y + r);
-                }
-            }
-        }
-    }
-
-    // --- Interparticle gradient contributions ---
-    // Loop over each particle and its neighbor list.
-    for (size_t i = 0; i < particles2D.size(); i++) {
-        const Particle2D &p = particles2D[i];
-        for (int j : p.neighborIndices) {
-            const Particle2D &q = particles2D[j];
-            F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);   // <── single‑line change
-            F dy = p.pos(1) - q.pos(1);
-            F d = std::sqrt(dx * dx + dy * dy);
-            const F eps = 1e-6; // or another appropriate threshold
-            if (d < eps) continue; // avoid division by zero
-            F overlap = (p.radius + q.radius) - d;
-            if (overlap > 0) {
-                // Gradient contribution: ∇E = -k_overlap * Δ * ( (dx, dy)/d ).
-                F factor = interactionParam * overlap / d;
-                // Update gradient for particle i.
-                gradient(3 * i)     += -factor * dx;
-                gradient(3 * i + 1) += -factor * dy;
-                // Update gradient for particle j (opposite sign).
-                gradient(3 * j)     += factor * dx;
-                gradient(3 * j + 1) += factor * dy;
-            }
-        }
-    }
-
-    //Prevent rigid body motion
-    if (periodicX && !particles2D.empty())
+    for (std::size_t ii = 0; ii < particles2D.size(); ++ii)
     {
-        gradient(0) += pinK * (particles2D[0].pos(0) - pinXref);
-        /*  (only x‑dof of particle 0; no effect on y or θ)  */
+        Particle2D p = particles2D[ii];
+        detectBoundaryCollision2D(p);
+
+        const int xIdx = DOF*ii;
+        const int yIdx = xIdx + 1;
+
+        /* gravity ---------------------------------------------------------- */
+        if (experiment == Experiment::Default)
+            g[yIdx] += (dynamic ? p.mass : F(1)) * gravity(1);
+
+        /* ----------------------------- CIRCLE wall ----------------------- */
+        if (p.BoundaryCollision == 1)
+        {
+            const F px = p.pos(0), py = p.pos(1), r = p.radius;
+
+            for (const auto &so : scenarioObjects)
+                if (auto *c = dynamic_cast<Circle*>(so.get()))
+                {
+                    const F dx = px - c->position(0);
+                    const F dy = py - c->position(1);
+                    const F dist2 = dx*dx + dy*dy;
+                    if (dist2 == F(0)) continue;
+
+                    const F dist  = std::sqrt(dist2);
+                    const F depth = dist + r - c->radius;          /* δ */
+                    if (depth <= F(0)) continue;
+
+                    const F kΔ2_over_d = overlapParam * depth * depth / dist;
+
+                    g[xIdx] += kΔ2_over_d * dx;
+                    g[yIdx] += kΔ2_over_d * dy;
+                }
+        }
+        /* ----------------------------- SQUARE wall ----------------------- */
+        else if (p.BoundaryCollision == 2)
+        {
+            const F px = p.pos(0), py = p.pos(1), r = p.radius;
+
+            for (const auto &so : scenarioObjects)
+                if (auto *sq = dynamic_cast<Square*>(so.get()))
+                {
+                    const F δxL = sq->min_x - (px - r);
+                    const F δxR = (px + r) - sq->max_x;
+                    const F δyB = sq->min_y - (py - r);
+                    const F δyT = (py + r) - sq->max_y;
+
+                    F δx = F(0), δy = F(0);
+                    int sx = 0, sy = 0;
+
+                    if (δxR > 0)      { δx = δxR;  sx = +1; }
+                    else if (δxL > 0) { δx = δxL;  sx = -1; }
+
+                    if (δyT > 0)      { δy = δyT;  sy = +1; }
+                    else if (δyB > 0) { δy = δyB;  sy = -1; }
+
+                    if (δx==0 && δy==0) continue;
+
+                    if (δx>0 && δy>0)                        /* CORNER */
+                    {
+                        const F n = std::sqrt(δx*δx + δy*δy);
+                        const F coef = overlapParam * n;
+
+                        g[xIdx] += coef * sx * δx;
+                        g[yIdx] += coef * sy * δy;
+                    }
+                    else                                     /* SINGLE */
+                    {
+                        if (δx > 0) g[xIdx] += sx * overlapParam * δx * δx;
+                        if (δy > 0) g[yIdx] += sy * overlapParam * δy * δy;
+                    }
+                }
+        }
+        /* ----------------------------- TUNNEL ---------------------------- */
+        else if (p.BoundaryCollision == 3)
+        {
+            const F py = p.pos(1), r = p.radius;
+
+            for (const auto &so : scenarioObjects)
+                if (auto *tu = dynamic_cast<Tunnel2D*>(so.get()))
+                {
+                    F δ = F(0);  int sy = 0;
+                    if (py - r < tu->BB.min_y)      { δ = tu->BB.min_y - (py - r); sy = -1; }
+                    else if (py + r > tu->BB.max_y) { δ = (py + r) - tu->BB.max_y; sy = +1; }
+
+                    if (δ > 0)
+                        g[yIdx] += overlapParam * sy * δ * δ;
+                }
+        }
     }
+
+    /* --------------------- inter-particle overlaps ----------------------- */
+    for (std::size_t i = 0; i < particles2D.size(); ++i)
+    {
+        const Particle2D &p = particles2D[i];
+        const int ix = DOF*i, iy = ix+1;
+
+        for (int j : p.neighborIndices)
+        {
+            if (j <= static_cast<int>(i)) continue;
+            const Particle2D &q = particles2D[j];
+
+            const F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
+            const F dy = p.pos(1) - q.pos(1);
+            const F dist2 = dx*dx + dy*dy;
+            if (dist2 == F(0)) continue;
+
+            const F dist = std::sqrt(dist2);
+            const F δ    = (p.radius + q.radius) - dist;
+            if (δ <= F(0)) continue;
+
+            const F kΔ2_over_d = interactionParam * δ * δ / dist;
+
+            const F gx = kΔ2_over_d * dx;
+            const F gy = kΔ2_over_d * dy;
+
+            g[ix] -= gx;  g[iy] -= gy;          /* particle i  */
+            g[DOF*j] += gx; g[DOF*j+1] += gy;   /* particle j  */
+        }
+    }
+
+    /* spring pin in x ------------------------------------------------------ */
+    if (periodicX && !particles2D.empty())
+        g[0] += pinK * (particles2D[0].pos(0) - pinXref);
 }
 
-void Simulation::compute_hessian(SparseMatrixF &hessian) const {
-    int n = 3 * particles2D.size();
-    hessian.resize(n, n);
-    hessian.setZero();
+/* -------------------------------------------------------------------------- */
+/*  HESSIAN                                                                   */
+/*  (sparse COO additions – same pattern everywhere)                          */
+/* -------------------------------------------------------------------------- */
+void Simulation::compute_hessian(SparseMatrixF &H) const
+{
+    const int N = DOF * particles2D.size();
+    H.resize(N, N);  H.setZero();
 
-    // Boundary collision Hessian contributions (existing code remains unchanged).
-    for (size_t i = 0; i < particles2D.size(); i++) {
-        Particle2D p = particles2D[i];
+    /* lambda to accumulate entries ---------------------------------------- */
+    auto add = [&](int r,int c,F v){ H.coeffRef(r,c) += v; };
+
+    /* --------------------------- boundary walls -------------------------- */
+    for (std::size_t ii = 0; ii < particles2D.size(); ++ii)
+    {
+        Particle2D p = particles2D[ii];
         detectBoundaryCollision2D(p);
-        if (p.BoundaryCollision == 1) {
-            for (const auto &so : scenarioObjects) {
-                if (Circle* circle = dynamic_cast<Circle*>(so.get())) {
-                    F px = p.pos(0), py = p.pos(1);
-                    F boundaryRadius = circle->radius;
-                    F so_x = so->position(0), so_y = so->position(1);
-                    F t3 = (p.radius - boundaryRadius) * overlapParam;
-                    F t4 = px * px;
-                    F t7 = py * py;
-                    F t10 = so_x * so_x;
-                    F t11 = so_y * so_y;
-                    F t12 = t4 - 2.0 * px * so_x + t7 - 2.0 * py * so_y + t10 + t11;
-                    F t13 = std::sqrt(t12);
-                    F t15 = 1.0 / (t13 * t12);
-                    F t18 = 2.0 * px - 2.0 * so_x;
-                    F t19 = t18 * t18;
-                    F t24 = (1.0 / t13) * t3;
-                    F t25 = overlapParam;
-                    F t30 = 2.0 * py - 2.0 * so_y;
-                    F t33 = (t30 * t18 * t15 * t3) / 4.0;
-                    F t34 = t30 * t30;
 
-                    hessian.coeffRef(3 * i, 3 * i)       = -t19 * t15 * t3 / 4.0 + t24 + t25; // 4.0 
-                    hessian.coeffRef(3 * i, 3 * i + 1)   = -t33;
-                    hessian.coeffRef(3 * i, 3 * i + 2)   = 0.0;
-                    hessian.coeffRef(3 * i + 1, 3 * i)   = -t33;
-                    hessian.coeffRef(3 * i + 1, 3 * i + 1) = -t34 * t15 * t3 / 4.0  + t24 + t25; // 4.0 
-                    hessian.coeffRef(3 * i + 1, 3 * i + 2) = 0.0;
-                    hessian.coeffRef(3 * i + 2, 3 * i)   = 0.0;
-                    hessian.coeffRef(3 * i + 2, 3 * i + 1) = 0.0;
-                    hessian.coeffRef(3 * i + 2, 3 * i + 2) = 0.0;
+        const int xIdx = DOF*ii;
+        const int yIdx = xIdx+1;
+
+        /* --------------------------- CIRCLE ----------------------------- */
+        if (p.BoundaryCollision == 1)
+        {
+            const F px = p.pos(0), py = p.pos(1), r = p.radius;
+        
+            for (const auto &so : scenarioObjects)
+                if (auto *c = dynamic_cast<Circle *>(so.get()))
+                {
+                    const F dx   = px - c->position(0);
+                    const F dy   = py - c->position(1);
+                    const F d2   = dx*dx + dy*dy;
+                    if (d2 <= tiny) continue;                 // centres coincide
+        
+                    const F  d   = std::sqrt(d2);
+                    const F  δ   = d + r - c->radius;         // penetration
+                    if (δ <= F(0)) continue;
+        
+                    const F kΔ   = overlapParam * δ;          // k Δ
+                    const F kΔ2  = kΔ * δ;                    // k Δ²
+        
+                    const F invD2 = F(1) / d2;
+                    const F invD3 = invD2 / d;
+                    const F kΔ2_over_d = kΔ2 / d;             // common c₁ = kΔ²/d
+        
+                    /* pre-squared helpers */
+                    const F dx2 = dx*dx, dy2 = dy*dy, dxy = dx*dy;
+        
+                    /* Hessian entries (see Maple) */
+                    const F Hxx = 2.0 * dx2 * invD2 * kΔ    //  + 2 kΔ (dx/d)²
+                                -       dx2 * invD3 * kΔ2   //  − kΔ² dx² / d³
+                                + kΔ2_over_d;               //  + kΔ² / d
+        
+                    const F Hyy = 2.0 * dy2 * invD2 * kΔ
+                                -       dy2 * invD3 * kΔ2
+                                + kΔ2_over_d;
+        
+                    const F Hxy = 2.0 * dxy * invD2 * kΔ
+                                -       dxy * invD3 * kΔ2;
+        
+                    add(xIdx, xIdx, Hxx);  add(yIdx, yIdx, Hyy);
+                    add(xIdx, yIdx, Hxy);  add(yIdx, xIdx, Hxy);   // symmetry
                 }
-            }
-        } else if (p.BoundaryCollision == 2) {
-            for (const auto &so : scenarioObjects) {
-                if (Square* square = dynamic_cast<Square*>(so.get())) {
-                    F px = p.pos(0), py = p.pos(1);
-                    F min_x = square->min_x, max_x = square->max_x;
-                    F min_y = square->min_y, max_y = square->max_y;
-                    F overlap_x_r = 0, overlap_x_l = 0;
-                    if (px - p.radius < min_x) {
-                        overlap_x_l = min_x - (px - p.radius);
-                    } else if (px + p.radius > max_x) {
-                        overlap_x_r = (px + p.radius) - max_x;
+        }
+        /* --------------------------- SQUARE ----------------------------- */
+        else if (p.BoundaryCollision == 2)
+        {
+            const F px = p.pos(0), py = p.pos(1), r = p.radius;
+
+            for (const auto &so : scenarioObjects)
+                if (auto *sq = dynamic_cast<Square*>(so.get()))
+                {
+                    const F δxL = sq->min_x - (px - r);
+                    const F δxR = (px + r) - sq->max_x;
+                    const F δyB = sq->min_y - (py - r);
+                    const F δyT = (py + r) - sq->max_y;
+
+                    F δx = F(0), δy = F(0);
+                    if (δxR > 0)      δx = δxR;
+                    else if (δxL > 0) δx = δxL;
+
+                    if (δyT > 0)      δy = δyT;
+                    else if (δyB > 0) δy = δyB;
+
+                    if (δx==0 && δy==0) continue;
+
+                    const F k = overlapParam;
+
+                    if (δx>0 && δy>0)                            /* CORNER */
+                    {
+                        const F n     = std::sqrt(δx*δx + δy*δy);
+                        const F inv_n = F(1) / n;
+                        const F Hxx = k * ( n + δx*δx*inv_n );
+                        const F Hyy = k * ( n + δy*δy*inv_n );
+                        const F Hxy = k * ( δx*δy*inv_n );
+
+                        add(xIdx,xIdx,Hxx); add(yIdx,yIdx,Hyy);
+                        add(xIdx,yIdx,Hxy); add(yIdx,xIdx,Hxy);
                     }
-                    F overlap_y_b = 0, overlap_y_t = 0;
-                    if (py - p.radius < min_y) {
-                        overlap_y_b = min_y - (py - p.radius);
-                    } else if (py + p.radius > max_y) {
-                        overlap_y_t = (py + p.radius) - max_y;
-                    }
-                    F total_overlap = std::sqrt(overlap_x_l * overlap_x_l +
-                                               overlap_y_t * overlap_y_t +
-                                               overlap_x_r * overlap_x_r +
-                                               overlap_y_b * overlap_y_b);
-                    F t1 = overlapParam;
-                    if (total_overlap > 0) {
-                        if (overlap_x_l > 0 || overlap_x_r > 0){
-                            hessian.coeffRef(3 * i, 3 * i)       = t1;
-                        }
-                        hessian.coeffRef(3 * i, 3 * i + 1)   = 0.0;
-                        hessian.coeffRef(3 * i, 3 * i + 2)   = 0.0;
-                        hessian.coeffRef(3 * i + 1, 3 * i)   = 0.0;
-                        if (overlap_y_t > 0 || overlap_y_b > 0){
-                            hessian.coeffRef(3 * i + 1, 3 * i + 1) = t1;
-                        }
-                        hessian.coeffRef(3 * i + 1, 3 * i + 2) = 0.0;
-                        hessian.coeffRef(3 * i + 2, 3 * i)   = 0.0;
-                        hessian.coeffRef(3 * i + 2, 3 * i + 1) = 0.0;
-                        hessian.coeffRef(3 * i + 2, 3 * i + 2) = 0.0;
+                    else                                          /* FACE  */
+                    {
+                        if (δx>0) add(xIdx,xIdx, 2.0 * k * δx);
+                        if (δy>0) add(yIdx,yIdx, 2.0 * k * δy);
                     }
                 }
-            }
-        } else if (p.BoundaryCollision == 3) {                    // ← NEW
-            for (const auto& so : scenarioObjects) {
-                if (dynamic_cast<Tunnel2D*>(so.get())) {
-                    /* same constant stiffness as square walls, but only in y */
-                    hessian.coeffRef(3*i + 1, 3*i + 1) += overlapParam;
+        }
+        /* --------------------------- TUNNEL ----------------------------- */
+        else if (p.BoundaryCollision == 3)
+        {
+            const F py = p.pos(1), r = p.radius;
+
+            for (const auto &so : scenarioObjects)
+                if (auto *tu = dynamic_cast<Tunnel2D*>(so.get()))
+                {
+                    F δ = F(0);
+                    if (py - r < tu->BB.min_y)      δ = tu->BB.min_y - (py - r);
+                    else if (py + r > tu->BB.max_y) δ = (py + r) - tu->BB.max_y;
+
+                    if (δ > 0) add(yIdx,yIdx, 2.0 * overlapParam * δ);
                 }
-            }
         }
     }
 
-    //--- Interparticle Hessian contributions ---
-    //Loop over each particle and its neighbor list.
-    for (size_t i = 0; i < particles2D.size(); i++) {
+    /* ----------------------- inter-particle blocks ----------------------- */
+    for (std::size_t i = 0; i < particles2D.size(); ++i)
+    {
         const Particle2D &p = particles2D[i];
-        for (int j : p.neighborIndices) {
-            const Particle2D &q = particles2D[j];
-            F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);   // <── single‑line change
-            F dy = p.pos(1) - q.pos(1);
-            F d = std::sqrt(dx * dx + dy * dy);
-            const F eps = 1e-6; // or another appropriate threshold
-            if (d < eps) continue; // avoid division by zero
-            F overlap = (p.radius + q.radius) - d;
-            if (overlap > 0) {
-                // Unit vector from q to p.
-                Eigen::Vector2d u(dx / d, dy / d);
-                // Compute the 2x2 Hessian block.
-                Eigen::Matrix2d H_block = interactionParam * (u * u.transpose()) -
-                    (interactionParam * overlap / d) * (Eigen::Matrix2d::Identity() - u * u.transpose());
+        const int ix = DOF*i, iy = ix+1;
 
-                // Update the Hessian blocks for particles i and j (only for x and y components).
-                for (int a = 0; a < 2; a++) {
-                    for (int b = 0; b < 2; b++) {
-                        hessian.coeffRef(3 * i + a, 3 * i + b) += H_block(a, b);
-                        hessian.coeffRef(3 * j + a, 3 * j + b) += H_block(a, b);
-                        hessian.coeffRef(3 * i + a, 3 * j + b) -= H_block(a, b);
-                        hessian.coeffRef(3 * j + a, 3 * i + b) -= H_block(a, b);
-                    }
-                }
-            }
+        for (int j : p.neighborIndices)
+        {
+            if (j <= static_cast<int>(i)) continue;
+            const Particle2D &q = particles2D[j];
+
+            const F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
+            const F dy = p.pos(1) - q.pos(1);
+            const F d2 = dx*dx + dy*dy;
+            if (d2 == F(0)) continue;
+
+            const F d  = std::sqrt(d2);
+            const F δ  = (p.radius + q.radius) - d;
+            if (δ <= F(0)) continue;
+
+            const F kΔ  = interactionParam * δ;
+            const F kΔ2 = kΔ * δ;
+
+            const F invD2 = F(1)/d2;
+            const F invD3 = invD2 / d;
+
+            const F fac1 = 2.0 * kΔ  * invD2;
+            const F fac2 =       kΔ2 * invD3;
+            const F T27  =       kΔ2 /  d;
+
+            const F dx2=dx*dx, dy2=dy*dy, dxy=dx*dy;
+
+            const F Hii_xx = fac1*dx2 + fac2*dx2 - T27;
+            const F Hii_yy = fac1*dy2 + fac2*dy2 - T27;
+            const F Hii_xy = fac1*dxy + fac2*dxy;
+
+            const F Hij_xx = -Hii_xx;
+            const F Hij_yy = -Hii_yy;
+            const F Hij_xy = -Hii_xy;
+
+            const int jx = DOF*j, jy = jx+1;
+
+            /* i-block */
+            add(ix,ix,Hii_xx); add(iy,iy,Hii_yy);
+            add(ix,iy,Hii_xy); add(iy,ix,Hii_xy);
+
+            /* j-block */
+            add(jx,jx,Hii_xx); add(jy,jy,Hii_yy);
+            add(jx,jy,Hii_xy); add(jy,jx,Hii_xy);
+
+            /* i–j off-diagonal */
+            add(ix,jx,Hij_xx); add(jx,ix,Hij_xx);
+            add(ix,jy,Hij_xy); add(jy,ix,Hij_xy);
+            add(iy,jx,Hij_xy); add(jx,iy,Hij_xy);
+            add(iy,jy,Hij_yy); add(jy,iy,Hij_yy);
         }
     }
 
-    //Prevent rigid body motion
+    /* spring pin in x ------------------------------------------------------ */
     if (periodicX && !particles2D.empty())
-        hessian.coeffRef(0,0) += pinK;
+        add(0,0,pinK);
 }
 
 void Simulation::compute_energy_dyn(F &value) {
 
-    F dynamicWeight = lambda / (timeStep * timeStep);
     compute_energy(value);
-    
-    if (globalState_1.size() == globalPositions.size()) {
-        value += dynamicWeight * (0.5 * (globalPositions - globalState_1).squaredNorm() 
-                                   - globalPositions.dot(globalState_1 - globalState_2));
-    } else {
+    /* make sure previous states exist -------------------------------------- */
+    if (globalState_1.size() != globalPositions.size()) {
         globalState_1 = globalPositions;
         globalState_2 = globalPositions;
-        value += dynamicWeight * (0.5 * (globalPositions - globalState_1).squaredNorm() 
-                                   - globalPositions.dot(globalState_1 - globalState_2));
     }
-    
+
+    /* 3) Δ²-like difference  a = xⁿ⁺¹ − 2xⁿ + xⁿ⁻¹ ----------------------- */
+    const VectorXF a = globalPositions
+                     - 2 * globalState_1
+                     + globalState_2;
+
+    const F inv_h2 = 1.0 / (timeStep * timeStep);
+
+    /* ½/h² · aᵀ M a ------------------------------------------------------- */
+    value += 0.5 * inv_h2 * a.dot(M * a);
+
     if (viscosity) {
         for (size_t i = 0; i < particles2D.size(); i++) {
             // Use the filtered effective neighbor count stored in the particle.
             F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
-            VectorXF diff = globalPositions.segment(3 * i, 3) - 
-                            globalState_1.segment(3 * i, 3);
-            value += 0.5 * viscosity_coeff * effectiveCountFiltered / (timeStep * timeStep) * diff.squaredNorm();
+            VectorXF diff = globalPositions.segment(DOF * i, DOF) - 
+                            globalState_1.segment(DOF * i, DOF);
+            value += 0.5 * viscosityCoeff * effectiveCountFiltered / (timeStep * timeStep) * diff.squaredNorm();
         }
     }
     if (experiment == Experiment::ShearFlow)
     {
         for (int i = 0; i < (int)particles2D.size(); ++i)
         {
-            const int base = 3 * i;
+            const int base = DOF * i;
 
             /* current & previous positions */
             F x1 = globalPositions(base    );
             F y1 = globalPositions(base + 1);
-            F t1 = globalPositions(base + 2);
             F x0 = globalState_1  (base    );
             F y0 = globalState_1  (base + 1);
-            F t0 = globalState_1  (base + 2);
 
             /* fluid velocity */
             F vfx , dvf_dy , dummy;
@@ -742,10 +797,9 @@ void Simulation::compute_energy_dyn(F &value) {
             /* particle velocity components */
             F dvx = (x1 - x0)/timeStep - vfx;
             F dvy = (y1 - y0)/timeStep;
-            F dvt = (t1 - t0)/timeStep;
 
             value += 0.5 * fluidViscosity *
-                     (dvx*dvx + dvy*dvy + dvt*dvt);
+                     (dvx*dvx + dvy*dvy);
         }
     }
     
@@ -753,23 +807,26 @@ void Simulation::compute_energy_dyn(F &value) {
 
 void Simulation::compute_gradient_dyn(VectorXF &gradient) {
     
-    F dynamicWeight = lambda / (timeStep * timeStep);
     compute_gradient(gradient);
-    
-    if (globalState_1.size() == globalPositions.size()) {
-        gradient += dynamicWeight * (globalPositions - 2 * globalState_1 + globalState_2);
-    } else {
+    if (globalState_1.size() != globalPositions.size()) {
         globalState_1 = globalPositions;
         globalState_2 = globalPositions;
-        gradient += dynamicWeight * (globalPositions - 2 * globalState_1 + globalState_2);
     }
+
+    const VectorXF a      = globalPositions
+                          - 2 * globalState_1
+                          + globalState_2;
+    const F        inv_h2 = 1.0 / (timeStep * timeStep);
+
+    /* ∇E_dyn = 1/h² · M a -------------------------------------------------- */
+    gradient += inv_h2 * (M * a);
     
     if (viscosity) {
         for (size_t i = 0; i < particles2D.size(); i++) {
             F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
-            gradient.segment(3 * i, 3) += viscosity_coeff * effectiveCountFiltered / (timeStep * timeStep) *
-                                          (globalPositions.segment(3 * i, 3) - 
-                                           globalState_1.segment(3 * i, 3));
+            gradient.segment(DOF * i, DOF) += viscosityCoeff * effectiveCountFiltered / (timeStep * timeStep) *
+                                          (globalPositions.segment(DOF * i, DOF) - 
+                                           globalState_1.segment(DOF * i, DOF));
         }
     }
     if (experiment == Experiment::ShearFlow)
@@ -781,15 +838,13 @@ void Simulation::compute_gradient_dyn(VectorXF &gradient) {
 
         for (int i = 0; i < (int)particles2D.size(); ++i)
         {
-            const int base = 3 * i;
+            const int base = DOF * i;
 
             /* positions */
             F x1 = globalPositions(base    );
             F y1 = globalPositions(base + 1);
-            F t1 = globalPositions(base + 2);
             F x0 = globalState_1  (base    );
             F y0 = globalState_1  (base + 1);
-            F t0 = globalState_1  (base + 2);
 
             /* fluid profile & derivative */
             F vfx , dvf_dy , dummy;
@@ -798,7 +853,6 @@ void Simulation::compute_gradient_dyn(VectorXF &gradient) {
             /* velocity differences */
             F dvx = (x1 - x0)*inv_dt - vfx;   // (v_p − v_f)_x
             F dvy = (y1 - y0)*inv_dt;         // v_p,y
-            F dvt = (t1 - t0)*inv_dt;         // ω
 
             // -------- grad_x --------
             gradient(base) += nu_over_dt * dvx;
@@ -806,9 +860,6 @@ void Simulation::compute_gradient_dyn(VectorXF &gradient) {
             // -------- grad_y --------
             gradient(base + 1) += nu_over_dt * dvy  // from v_p,y
                                 - nu * dvx * dvf_dy; // from v_f(y)
-
-            // -------- grad_theta ----
-            gradient(base + 2) += nu_over_dt * dvt;
         }
     }
     
@@ -816,20 +867,19 @@ void Simulation::compute_gradient_dyn(VectorXF &gradient) {
 }
 
 void Simulation::compute_hessian_dyn(SparseMatrixF &hessian) {
-    
-    F dynamicWeight = lambda / (timeStep * timeStep);
+
     compute_hessian(hessian);
-    
-    for (int i = 0; i < (3 * static_cast<int>(particles2D.size())); i++) {
-        hessian.coeffRef(i, i) += dynamicWeight;
-    }
+    const F inv_h2 = 1.0 / (timeStep * timeStep);
+
+    /* H += 1/h² · M  (diagonal, so this is cheap) ------------------------- */
+    hessian += inv_h2 * M; 
     
     if (viscosity) {
         for (size_t i = 0; i < particles2D.size(); i++) {
             F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
-            for (int j = 0; j < 3; j++) {
-                int index = static_cast<int>(3 * i + j);
-                hessian.coeffRef(index, index) += viscosity_coeff * effectiveCountFiltered / (timeStep * timeStep);
+            for (int j = 0; j < DOF; j++) {
+                int index = static_cast<int>(DOF * i + j);
+                hessian.coeffRef(index, index) += viscosityCoeff * effectiveCountFiltered / (timeStep * timeStep);
             }
         }
     }
@@ -842,7 +892,7 @@ void Simulation::compute_hessian_dyn(SparseMatrixF &hessian) {
 
         for (int i = 0; i < (int)particles2D.size(); ++i)
         {
-            const int base = 3 * i;
+            const int base = DOF * i;
 
             /* positions & velocities */
             F x1 = globalPositions(base    );
@@ -862,7 +912,6 @@ void Simulation::compute_hessian_dyn(SparseMatrixF &hessian) {
 
             /* ===== diagonal blocks ===== */
             hessian.coeffRef(base    , base    ) += nu_dt2;   // d²E/dx²
-            hessian.coeffRef(base + 2, base + 2) += nu_dt2;   // d²E/dθ²
 
             /* d²E/dy² :
                nu_dt2  from v_p,y term
@@ -912,6 +961,11 @@ F Simulation::wrapX(F x) const {
 
 inline F Simulation::periodicDx(F x1,int ix1, F x2,int ix2) const
 {
+    // const F W = maxX - minX;
+    // F dx = x1 - x2;
+    // dx = dx - std::round(dx / W) * W;   // W = maxX-minX
+    // return dx;
+
     if (!periodicX) return x1 - x2;
 
     const F W = maxX - minX;
@@ -944,8 +998,8 @@ void Simulation::renormalise()
         int dix = p.ix - old_ix;
         if (dix != 0) {
             F shift = (F)dix * W;
-            globalState_1(3*i    ) += shift;
-            globalState_2(3*i    ) += shift;
+            globalState_1(DOF*i    ) += shift;
+            globalState_2(DOF*i    ) += shift;
         }
     }
 }
@@ -956,22 +1010,22 @@ void Simulation::updateEffectiveNeighborCounts() {
         F rawEffectiveCount = 0;
 
         // Fetch mod‑position + wrap counter for convenience
-        const F xi   = globalPositions(3*i    );  // already ∈ [minX,maxX)
+        const F xi   = globalPositions(DOF*i    );  // already ∈ [minX,maxX)
         const int ixi = particles2D[i].ix;
 
         // Compute the raw effective count using a soft kernel w(d) = exp(−d²/σ²)
         for (int j : particles2D[i].neighborIndices) {
             // x‑difference with correct periodic image
-            const F xj   = globalPositions(3*j    );
+            const F xj   = globalPositions(DOF*j    );
             const int ixj = particles2D[j].ix;
             F dx = periodicDx(xi, ixi, xj, ixj);
 
             // y is non‑periodic
-            F dy = globalPositions(3*i + 1)
-                 - globalPositions(3*j + 1);
+            F dy = globalPositions(DOF*i + 1)
+                 - globalPositions(DOF*j + 1);
 
             F d2 = dx*dx + dy*dy;  // ignore θ
-            rawEffectiveCount += std::exp(-d2 / (sigma * sigma));
+            rawEffectiveCount += std::exp(-d2 / (kernelSigma * kernelSigma));
         }
 
         // Store the raw count for this frame
@@ -994,20 +1048,20 @@ void Simulation::updateEffectiveNeighborCountsFinal() {
         F rawEffectiveCount = 0;
 
         // Cached mod‐position + wrap counter
-        const F  xi   = globalPositions(3*i    );  // ∈ [minX,maxX)
+        const F  xi   = globalPositions(DOF*i    );  // ∈ [minX,maxX)
         const int ixi = particles2D[i].ix;
 
         // Soft‐kernel sum over neighbours
         for (int j : particles2D[i].neighborIndices) {
-            const F  xj   = globalPositions(3*j    );
+            const F  xj   = globalPositions(DOF*j    );
             const int ixj = particles2D[j].ix;
 
             F dx = periodicDx(xi, ixi, xj, ixj);
-            F dy = globalPositions(3*i + 1)
-                 - globalPositions(3*j + 1);
+            F dy = globalPositions(DOF*i + 1)
+                 - globalPositions(DOF*j + 1);
 
             F d2 = dx*dx + dy*dy;
-            rawEffectiveCount += std::exp(-d2 / (sigma * sigma));
+            rawEffectiveCount += std::exp(-d2 / (kernelSigma * kernelSigma));
         }
 
         // Store the raw count
@@ -1025,7 +1079,7 @@ void Simulation::updateEffectiveNeighborCountsFinal() {
 
 
 Particle2D::Particle2D(F radius, const Simulation& simParams)
-    : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
+    : pos(Vector2F::Zero()), vel(Vector2F::Zero()), acc(Vector2F::Zero()), radius(radius)
 {
     // For a 2D disc, mass = area * density.
     mass = M_PI * radius * radius * simParams.density;
@@ -1034,7 +1088,7 @@ Particle2D::Particle2D(F radius, const Simulation& simParams)
 }
 
 Particle3D::Particle3D(F radius, const Simulation& sim)
-    : pos(Vector6F::Zero()), vel(Vector6F::Zero()), acc(Vector6F::Zero()), radius(radius)
+    : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
 {
     // For a sphere, mass = volume * density.
     mass = (4.0 / 3.0) * M_PI * std::pow(radius, 3) * sim.density;
@@ -1064,7 +1118,7 @@ std::vector<Particle2D> Simulation::createRandomParticles2D() {
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::normal_distribution<F> radiusDist(mean, std);   
+    std::normal_distribution<F> radiusDist(radiusMean, radiusStd);   
     std::uniform_real_distribution<F> distX(xMin, xMax);
 
     // ------------------------------------------------------------
@@ -1088,7 +1142,6 @@ std::vector<Particle2D> Simulation::createRandomParticles2D() {
             std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
             cand.pos(0) = distX(gen);
             cand.pos(1) = distY(gen);
-            cand.pos(2) = 0.0f;
 
             // enforce pos.x ∈ [xMin, xMax)
             // (distX already does this, but just to be safe)
@@ -1298,4 +1351,33 @@ int Tunnel2D::detectCollision(const Particle2D& p) const
     if (p.pos(1) - p.radius < BB.min_y || p.pos(1) + p.radius > BB.max_y)
         return 3;                 // same collision code used by Square
     return 0;
+}
+
+void Simulation::computeCFL() 
+{
+    F advectiveDisplacement = V0 * timeStep;
+
+std::cout 
+    << "Advective CFL check: V0*Δt = " << advectiveDisplacement
+    << "  ;  minimum allowed = " << minParticleDiam
+    << "  →  " 
+    << (advectiveDisplacement < minParticleDiam ? "OK\n" : "TOO LARGE!\n");
+}
+
+/* ================================================================== */
+/*  BUILD MASS MATRIX (diagonal)                                      */
+/* ================================================================== */
+void Simulation::buildMassMatrix(SparseMatrixF& M) const
+{
+    const int n = int(particles2D.size());
+    std::vector<Trip> T; T.reserve(2*n);
+
+    for (int i=0;i<n;++i)
+    {
+        const F m = particles2D[i].mass;
+        T.emplace_back(DOF*i    ,DOF*i    ,m);
+        T.emplace_back(DOF*i + 1,DOF*i + 1,m);
+    }
+    M.resize(DOF*n,DOF*n);
+    M.setFromTriplets(T.begin(),T.end());
 }

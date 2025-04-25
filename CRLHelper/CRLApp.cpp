@@ -10,8 +10,62 @@
 
 #include "ThirdParty/polyscope/deps/glfw/include/GLFW/glfw3.h"
 #include "ThirdParty/polyscope/deps/imgui/imgui/imgui.h"
+#include "backends/imgui_impl_opengl3.h"
 
 #include "ThirdParty/implot/implot.h"
+
+/* -------------------------------------------------------------------------- */
+/*  NEW: load a font that contains Greek glyphs                               */
+/* -------------------------------------------------------------------------- */
+static void initFonts()
+{
+    ImGuiIO& io = ImGui::GetIO();
+
+    // ---- Greek & Coptic block 0x0370-0x03FF ----
+    static const ImWchar greekRange[] = { 0x0370, 0x03FF, 0 };  // + sentinel
+
+    // 1. ASCII base
+    ImFont* base = io.Fonts->AddFontFromFileTTF(
+        "/workspaces/CRLProjectTemplate/assets/fonts/Roboto-Regular.ttf", 16.0f,
+        nullptr,                          // cfg
+        io.Fonts->GetGlyphRangesDefault());
+
+    // 2. Merge complete Greek block
+    ImFontConfig cfg;
+    cfg.MergeMode        = true;
+    cfg.GlyphMinAdvanceX = base->FontSize;   // keep same size
+    io.Fonts->AddFontFromFileTTF(
+        "/workspaces/CRLProjectTemplate/assets/fonts/Roboto-Regular.ttf", 16.0f,
+        &cfg,
+        greekRange);
+
+    // 3. Build & upload
+    io.Fonts->Build();
+    ImGui_ImplOpenGL3_DestroyDeviceObjects();
+    ImGui_ImplOpenGL3_CreateDeviceObjects();
+
+    io.FontDefault = base;
+}
+/* -------------------------------------------------------------------------- */
+
+static void initializePolyscope() {
+    // 1) Polyscope init (which creates the ImGui context)
+    polyscope::options::autocenterStructures            = false;
+    polyscope::options::autoscaleStructures             = false;
+    polyscope::options::automaticallyComputeSceneExtents = false;
+    polyscope::state::lengthScale                       = 1.;
+    polyscope::state::boundingBox                       = {{-1., -1., -1.}, {1., 1., 1.}};
+    polyscope::view::windowWidth                        = 1920;
+    polyscope::view::windowHeight                       = 1080;
+    polyscope::options::groundPlaneMode                 = polyscope::GroundPlaneMode::None;
+    polyscope::options::shadowDarkness                  = 0.4;
+    polyscope::options::buildGui                        = false;
+    polyscope::options::ssaaFactor                      = 2;
+    polyscope::init();
+
+    initFonts();
+}
+
 
 static CRLControlState getControlState() {
     CRLControlState control_state;
@@ -47,22 +101,6 @@ static void setCamera(const CRLCamera &camera) {
     polyscope::CameraParameters camera_params(polyscope::CameraIntrinsics::fromFoVDegVerticalAndAspect(fovY_deg, 1.0),
                                               polyscope::CameraExtrinsics::fromVectors(eye, center - eye, up));
     polyscope::view::setViewToCamera(camera_params);
-}
-
-static void initializePolyscope() {
-    polyscope::options::autocenterStructures = false;
-    polyscope::options::autoscaleStructures = false;
-    polyscope::options::automaticallyComputeSceneExtents = false;
-    polyscope::state::lengthScale = 1.;
-    polyscope::state::boundingBox = std::tuple<glm::vec3, glm::vec3>{{-1., -1., -1.}, {1., 1., 1.}};
-    polyscope::view::windowWidth = 1920;
-    polyscope::view::windowHeight = 1080;
-    polyscope::options::groundPlaneMode = polyscope::GroundPlaneMode::None;
-    polyscope::options::groundPlaneHeightFactor = 0.;
-    polyscope::options::shadowDarkness = 0.4;
-    polyscope::options::buildGui = false;
-    polyscope::options::ssaaFactor = 2;
-    polyscope::init();
 }
 
 static void updateViewerData(const std::shared_ptr<CRLSubApp> &sub_app) {
@@ -166,6 +204,10 @@ void CRLApp::launch() {
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Once);
         ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x * 0.25, ImGui::GetIO().DisplaySize.y), //
                                  ImGuiCond_Once);
+        
+        // ImGui::Begin("Test");
+        // ImGui::Text(u8"Δ ν μ σ ρ  ← if you see ? the file is not UTF-8");
+        // ImGui::End();
         ImGui::Begin("Menu");
 
         /// Combo box to select SubApp.

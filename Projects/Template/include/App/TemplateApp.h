@@ -37,7 +37,7 @@ class TemplateApp : public CRLSubApp {
     I calls = 0;
 
     /// Analysis
-    I check_gradient_epsilon_exponent = -4;
+    I check_gradient_epsilon_exponent = -6;
     bool check_gradient_print_all = false;
 
     /// Camera state

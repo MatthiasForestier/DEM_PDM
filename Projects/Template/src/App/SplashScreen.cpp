@@ -92,8 +92,16 @@ SplashScreenResult showSplashScreen() {
 
             // Add scenario shape selection. Circle is default (index 0).
             static int shapeIndex = 0;
-            const char* scenarioShapes[] = {"Circle", "Square"};
-            ImGui::Combo("Scenario Object", &shapeIndex, scenarioShapes, IM_ARRAYSIZE(scenarioShapes));
+            const char* scenarioShapes[] = {"Circle","Square","Tunnel"};
+            ImGui::Combo("Scenario Object",&shapeIndex,scenarioShapes,IM_ARRAYSIZE(scenarioShapes));
+            result.scenarioShapeIndex = shapeIndex;
+        
+            // only for tunnel do we need shear / periodic parameters
+            if (shapeIndex == 2) {
+                ImGui::Checkbox   ("Periodic X",       &result.periodicX);
+                ImGui::InputDouble("V₀ (max speed)",    &result.V0,           0.1, 1.0, "%.2f");
+                ImGui::InputDouble("L (half‑height)",   &result.L,            0.1, 1.0, "%.2f");
+            }
             result.scenarioShapeIndex = shapeIndex;
 
             if (ImGui::Button("Run Export Simulation")) {

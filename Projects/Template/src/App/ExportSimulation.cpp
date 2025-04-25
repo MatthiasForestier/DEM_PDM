@@ -29,20 +29,38 @@ void exportSimulationForML(const SplashScreenResult &params) {
     app.dynamic_convergence_threshold = pow(10.0, params.exponent_convergence_threshold);
     app.sim.viscosity = params.viscosity;
     app.sim.numParticles = params.numParticles;
+    app.sim.periodicX    = params.periodicX;
+    app.sim.V0             = params.V0;
+    app.sim.L              = params.L;
     // IMPORTANT: If you're using 2D particles, make sure use3D is false.
     app.sim.use3D = false;  
     app.sim.endTime = params.simulationTime;
 
     // Set up scenario.
     app.sim.scenarioObjects.clear();
-    if (params.scenarioShapeIndex == 0) {
-        // Create a Circle scenario object with 64 segments, radius 1.1, centered at the origin.
-        app.sim.scenarioObjects.push_back(std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f)));
-    } else {
-        // Create a Square scenario object with half-dimensions 1.1 and 0.9, centered at the origin.
-        app.sim.scenarioObjects.push_back(std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f)));
-    }
     
+    if (params.scenarioShapeIndex == 0) {
+        // Circle
+        app.sim.scenarioObjects.push_back(
+            std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f))
+        );
+    }
+    else if (params.scenarioShapeIndex == 1) {
+        // Square
+        app.sim.scenarioObjects.push_back(
+            std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f))
+        );
+    }
+    else /* = 2: Tunnel */ {
+        // Tunnel2D: halfLength = 2.0f (visual), halfWidth = sim.L/2
+        float halfLen = 2.0f;
+        float halfWid = app.sim.L * 0.5f;
+        app.sim.scenarioObjects.push_back(
+            std::make_unique<Tunnel2D>(halfLen, halfWid, Vector3F(0.0f, 0.0f, 0.0f))
+        );
+        app.sim.experiment = Simulation::Experiment::ShearFlow;
+    }
+        
     // Ensure output directory exists.
     const std::string outputDir = "output";
     if (!stdfs::exists(outputDir)) {
@@ -82,10 +100,19 @@ void exportSimulationForML(const SplashScreenResult &params) {
         // Simulation loop for one run.
         while (t < app.sim.endTime) {
             // Perform an optimization step.
+             // Perform an optimization step and check for max‑iteration failure.
+            Optimization::OptimizationStatus status;
             if (app.sim.dynamic) {
-                Optimization::OptimizationStatus status = app.energyMinimizationStepDyn();
+                status = app.energyMinimizationStepDyn();
             } else {
-                Optimization::OptimizationStatus status = app.energyMinimizationStep();
+                status = app.energyMinimizationStep();
+            }
+            // If we failed to converge (max‑iter reached), skip the rest of this run:
+            if (status != 1) {
+                std::cout << "Run " << run 
+                        << ", time " << t 
+                        << ": max iterations reached, skipping to next run.\n";
+                break;
             }
             app.sim.updateScenarioAnimation(app.sim.timeStep);
             
@@ -100,8 +127,8 @@ void exportSimulationForML(const SplashScreenResult &params) {
                     << app.sim.gravity(1) << ","         // gravity_z
                     << app.sim.overlapParam << ","         // overlapParam
                     << app.sim.interactionParam << ","     // interactionParam
-                    << app.sim.viscosity_coeff << ","      // viscosity_coeff
-                    << app.sim.sigma << ","                // sigma
+                    << app.sim.viscosityCoeff << ","      // viscosity_coeff
+                    << app.sim.kernelSigma << ","                // sigma
                     << app.sim.alpha << ",";               // alpha
             // Scenario object position.
             // We assume at least one scenario object exists.

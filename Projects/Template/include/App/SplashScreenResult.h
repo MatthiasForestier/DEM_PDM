@@ -14,6 +14,9 @@ struct SplashScreenResult {
     double simulationTime;    // Duration (in seconds) for each simulation run.
     double animationStartTime;
     int scenarioShapeIndex = 0;
+    bool periodicX;
+    double V0;
+    double L;
 };
 
 #endif // SPLASH_SCREEN_RESULT_H

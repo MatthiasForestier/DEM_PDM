@@ -14,7 +14,7 @@ TemplateApp::TemplateApp(const SplashScreenResult &initParam) {
     // Initialize your simulation parameters using initParam.
     // For instance:
     sim.use3D = initParam.use3D;
-    sim.timeStep = initParam.timeStep;
+    // sim.timeStep = initParam.timeStep;
     sim.dynamic = initParam.dynamic;
     sim.friction = initParam.viscosity;
     // ... initialize any other simulation parameters ...
@@ -30,6 +30,7 @@ void TemplateApp::initializeSubApp() {
     sim.particles2D = sim.createRandomParticles2D();
     for (auto &p : sim.particles2D) p.ix = 0;
     reinitializeGlobalState();
+    sim.buildMassMatrix(sim.M);
 }
 
 void TemplateApp::makeConfigWindow() {
@@ -54,6 +55,8 @@ void TemplateApp::makeConfigWindow() {
         breach = 0;
         calls = 0;
         logger.clear();
+        sim.minParticles();
+        sim.buildMassMatrix(sim.M);
     }
 
     // --- New UI for Scenario Objects ---
@@ -91,7 +94,7 @@ void TemplateApp::makeConfigWindow() {
                             std::make_unique<Square>(1.1f, 0.9f,
                                                     Vector3F(0,0,0)));        break;
                 case 2:  sim.scenarioObjects.push_back(
-                            std::make_unique<Tunnel2D>( /*halfLen =*/ 2.0f,
+                            std::make_unique<Tunnel2D>( /*halfLen =*/ sim.L/2,
                                                         /*halfWid =*/ sim.L/2,
                                                         Vector3F(0,0,0)));     break;
             }
@@ -221,6 +224,10 @@ void TemplateApp::showLoggerWindow() {
 
 
 void TemplateApp::mainLoop() {
+    if (optimize && sim.dynamic && sim.periodicX && calls == 0) {
+        sim.computeCFL();
+    }
+        
     if (optimize) {
         if (sim.dynamic) {
             Optimization::OptimizationStatus status = energyMinimizationStepDyn();
@@ -265,7 +272,7 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStep() {
     auto status = optimization.step(globalState_0);
     // Update the simulation with the optimized state.
     sim.setGlobalState(simCopy.getGlobalState());
-    sim.renormalise();      
+    sim.renormalise();
     sim.updateAuxiliaryStructures();
     // Log the objective, gradient norm, and Hessian condition number.
     F currentObjective;
@@ -338,12 +345,13 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
             std::cout << "Maximum iterations reached. Stopping simulation." << std::endl;
             // std::cout << iter << std::endl;
             optimize = false;
+            breach += 1;
             break;
         }
     }while (grad.norm() > dynamic_convergence_threshold && iter < maxIter);
     
     sim.setGlobalState(simCopy.getGlobalState());
-    sim.renormalise();      
+    sim.renormalise();     
     sim.updateAuxiliaryStructures();
     sim.updateEffectiveNeighborCountsFinal();
     sim.globalState_2 = sim.globalState_1;
@@ -434,14 +442,14 @@ void TemplateApp::getViewerData(std::vector<CRLViewerData>& viewer_data, CRLCame
     int totalParticleFaces = numParticles * numSegments;
 
     // Preallocate the matrices.
-    particleViewerData.mesh_v.resize(totalParticleVertices, 3);
-    particleViewerData.mesh_f.resize(totalParticleFaces, 3);
+    particleViewerData.mesh_v.resize(totalParticleVertices, DOF_FULL);
+    particleViewerData.mesh_f.resize(totalParticleFaces, DOF_FULL);
 
     int vertexOffset = 0;
     int faceOffset = 0;
     for (int i = 0; i < numParticles; i++) {
         const Particle2D& p = sim.particles2D[i];
-        Vector3F center = p.pos;
+        Vector3F center(p.pos(0), p.pos(1), 0.0f);
         center(0) = sim.wrapX(center(0));   // visual copy only
         F radius = p.radius;
 
@@ -498,8 +506,8 @@ void TemplateApp::getViewerData(std::vector<CRLViewerData>& viewer_data, CRLCame
         totalScenarioFaces += static_cast<int>(so.vertices.size());
     }
 
-    scenarioViewerData.mesh_v.resize(totalScenarioVertices, 3);
-    scenarioViewerData.mesh_f.resize(totalScenarioFaces, 3);
+    scenarioViewerData.mesh_v.resize(totalScenarioVertices, DOF_FULL);
+    scenarioViewerData.mesh_f.resize(totalScenarioFaces, DOF_FULL);
 
     int scenarioVertexOffset = 0;
     int scenarioFaceOffset = 0;
@@ -527,7 +535,7 @@ void TemplateApp::getViewerData(std::vector<CRLViewerData>& viewer_data, CRLCame
         scenarioFaceOffset++;
     }
 
-    scenarioViewerData.mesh_c = MatrixXF::Constant(totalScenarioFaces, 3, 0.0);
+    scenarioViewerData.mesh_c = MatrixXF::Constant(totalScenarioFaces, DOF_FULL, 0.0);
 }
 
 

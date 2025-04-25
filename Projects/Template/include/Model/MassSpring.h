@@ -6,6 +6,9 @@
 #include <cmath>
 #include <memory>
 
+constexpr int DOF_FULL   = 3;   // x, y, θ  (internal)
+constexpr int DOF    = 2;   // x, y     (optimizer)
+
 //------------------------------------------------------------------------------
 // Basic types
 //------------------------------------------------------------------------------
@@ -108,16 +111,12 @@ class Tunnel2D : public ScenarioObject {
 
 class Particle2D {
 public:
-    // Position: [x, y, theta]
-    Vector3F pos;
-    // Velocity: [x_dot, y_dot, theta_dot]
-    Vector3F vel;
-    // Acceleration: [x_ddot, y_ddot, theta_ddot]
-    Vector3F acc;
-    // Forces.
-    Vector3F force;
-    // Moments.
-    Vector3F moment;
+    // Position: [x, y]
+    Vector2F pos;
+    // Velocity: [x_dot, y_dot]
+    Vector2F vel;
+    // Acceleration: [x_ddot, y_ddot]
+    Vector2F acc;
 
     I BoundaryCollision = 0;
     I SquareCollision = 0;
@@ -136,16 +135,12 @@ public:
 
 class Particle3D {
 public:
-    // Position: [x, y, z, theta, phi, psi]
-    Vector6F pos;
-    // Velocity: [x_dot, y_dot, z_dot, theta_dot, phi_dot, psi_dot]
-    Vector6F vel;
-    // Acceleration: [x_ddot, y_ddot, z_ddot, theta_ddot, phi_ddot, psi_ddot]
-    Vector6F acc;
-    // Forces.
-    Vector3F force;
-    // Moments.
-    Vector3F moment;
+    // Position: [x, y, z]
+    Vector3F pos;
+    // Velocity: [x_dot, y_dot, z_dot]
+    Vector3F vel;
+    // Acceleration: [x_ddot, y_ddot, z_ddot]
+    Vector3F acc;
 
     I BoundaryCollision = 0;
     I SquareCollision = 0;
@@ -181,15 +176,15 @@ public:
 
     // Particle-related parameters.
     F density = 2780.0; // [kg/m^3]
-    F overlapParam = 1000000;
-    F interactionParam = 100000;
+    F overlapParam = 100000000;
+    F interactionParam = 10000000;
 
     //Particles shape related parameters.
     bool is_circular = true;
     bool is_square = false;
     bool is_elliptical = false;
-    F mean = 0.03;  // [m]
-    F std = 0.01;  // [m]
+    F radiusMean = 0.05;  // [m]
+    F radiusStd = 0.005;  // [m]
 
     // Grid-related parameters.
     F maxParticleRadius = 0.0;
@@ -206,8 +201,8 @@ public:
     bool dynamic = false;
     bool friction = false;
     bool viscosity = false;
-    F viscosity_coeff = 0.1;
-    F sigma = 3 * mean;  
+    F viscosityCoeff = 0.1;
+    F kernelSigma = 3 * radiusMean;  
     F alpha = 0.5;
 
     /// Animation parameters.
@@ -223,6 +218,8 @@ public:
     VectorXF globalState_2;
     std::vector<Particle2D> particles2D;
     std::vector<Particle3D> particles3D;
+    F minParticleDiam = 100;
+    SparseMatrixF M; //mass matrix
 
     //Experiment parameters.
     enum class Experiment { Default = 0, ShearFlow = 1 };
@@ -231,9 +228,9 @@ public:
     // Shear‐flow parameters
     bool periodicX       = false;    // wrap X
     F  fluidViscosity    = 1.0f;     // ν in F_drag = ν ||v_p−v_f||²
-    F  V0                = 1.0f;     // max fluid speed
+    F  V0                = 0.1f;     // max fluid speed
     F  L                 = 1.0f;     // half‐height of tunnel
-    F     pinK      = 1e-6;       // << spring stiffness
+    F     pinK      = 1e-2;       // << spring stiffness
     F     pinXref   = 0.0;        // << reference position
 
 
@@ -258,8 +255,8 @@ public:
           is_circular(other.is_circular),
           is_square(other.is_square),
           is_elliptical(other.is_elliptical),
-          mean(other.mean),
-          std(other.std),
+          radiusMean(other.radiusMean),
+          radiusStd(other.radiusStd),
           maxParticleRadius(other.maxParticleRadius),
           cellSize(other.cellSize),
           numCellsX(other.numCellsX),
@@ -272,8 +269,8 @@ public:
           dynamic(other.dynamic),
           friction(other.friction),
           viscosity(other.viscosity),
-          viscosity_coeff(other.viscosity_coeff),
-          sigma(other.sigma),
+          viscosityCoeff(other.viscosityCoeff),
+          kernelSigma(other.kernelSigma),
           alpha(other.alpha),
           animateScenario(other.animateScenario),
           animationTimer(other.animationTimer),
@@ -285,6 +282,8 @@ public:
           globalState_2(other.globalState_2),
           particles2D(other.particles2D),
           particles3D(other.particles3D),
+          minParticleDiam(other.minParticleDiam),
+          M(other.M),
           experiment(other.experiment),
           periodicX(other.periodicX),
           fluidViscosity(other.fluidViscosity),
@@ -337,5 +336,8 @@ public:
     inline F periodicDx(F x1, int ix1, F x2, int ix2) const;
     void renormalise();
     void updateCellSizeFromParticles();
+    void minParticles();
+    void computeCFL ();
+    void buildMassMatrix(SparseMatrixF& M) const;
 
 };
