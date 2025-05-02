@@ -1,13 +1,24 @@
 #pragma once
 
-#include "CRLHelper/VecMatDef.h"
 #include <vector>
 #include <string>
 #include <cmath>
 #include <memory>
+#include <Eigen/Core>
+#include <Eigen/Sparse>
+#include <Eigen/Dense>
+#include <algorithm>
+#include <iostream>
+#include <random>
+#include <unordered_set>
+
+#include "CRLHelper/MapleHelper.h"
+#include "CRLHelper/VecMatDef.h"
 
 constexpr int DOF_FULL   = 3;   // x, y, θ  (internal)
-constexpr int DOF    = 2;   // x, y     (optimizer)
+constexpr int DOF       =  2;
+
+/// number of active degrees of freedom per 2-D particle
 
 //------------------------------------------------------------------------------
 // Basic types
@@ -118,19 +129,34 @@ public:
     // Acceleration: [x_ddot, y_ddot]
     Vector2F acc;
 
+    // ---------- deformation of particles -----------------
+    F epsV = 0.0;
+    F epsVdot = 0.0;
+
+    // ---------- collision bookkeeping -----------------
     I BoundaryCollision = 0;
     I SquareCollision = 0;
+
+    // ---------- neighbor bookkeeping -----------------
     std::vector<I> neighborIndices;
     F effectiveCountCurrent = 0;  
-    F prevEffectiveCount = 0; 
+    F prevEffectiveCount = 0;
+    
+    // ---------- particle properties -----------------
     F radius;
     I ix = 0; 
     F mass;
     F inertia; // Moment of inertia for a disc: (1/2)*mass*radius^2
     Color color = Color(0.678f, 0.847f, 0.902f);
 
+    // ---------- deformation‑viscosity bookkeeping -----------------
+    Matrix2F F_prev = Matrix2F::Identity();   ///< F at previous step
+    Matrix2F D      = Matrix2F::Zero();       ///< symmetric rate‑of‑def.
+    Vector2F X0     = Vector2F::Zero();       ///< reference position
+
     // Constructor (implementation in cpp file).
     Particle2D(F radius, const Simulation& simParams);
+    F effectiveRadius() const;
 };
 
 class Particle3D {
@@ -142,6 +168,8 @@ public:
     // Acceleration: [x_ddot, y_ddot, z_ddot]
     Vector3F acc;
 
+    F epsV = 0.0;
+    F epsVdot = 0.0;
     I BoundaryCollision = 0;
     I SquareCollision = 0;
     std::vector<I> neighborIndices;
@@ -178,6 +206,12 @@ public:
     F density = 2780.0; // [kg/m^3]
     F overlapParam = 100000000;
     F interactionParam = 10000000;
+    F Young  = 215000;     // material E (could be global)
+    F Poisson = 0.3;    // ν  (or exactly 0.5 for incompressible trick)
+    F K;
+    bool boolSoftDEM = false; // Soft-DEM flag
+    F a = 0.58f; 
+    F b = 2.0f;
 
     //Particles shape related parameters.
     bool is_circular = true;
@@ -199,11 +233,13 @@ public:
 
     /// Dynamic formulation.
     bool dynamic = false;
-    bool friction = false;
+    bool deformation_viscosity = false;
     bool viscosity = false;
     F viscosityCoeff = 0.1;
     F kernelSigma = 3 * radiusMean;  
     F alpha = 0.5;
+    F   eta_def   = 10.0;     ///< dynamic viscosity [Pa·s]
+    F   F_kernel  = 2.5;      ///< h = F_kernel * maxParticleRadius
 
     /// Animation parameters.
     bool animateScenario = false;
@@ -252,6 +288,12 @@ public:
           density(other.density),
           overlapParam(other.overlapParam),
           interactionParam(other.interactionParam),
+          Young(other.Young),
+          Poisson(other.Poisson),
+          K(other.K),
+          boolSoftDEM(other.boolSoftDEM),
+          a(other.a),
+          b(other.b),
           is_circular(other.is_circular),
           is_square(other.is_square),
           is_elliptical(other.is_elliptical),
@@ -267,11 +309,13 @@ public:
           maxY(other.maxY),
           grid(other.grid),
           dynamic(other.dynamic),
-          friction(other.friction),
+          deformation_viscosity(other.deformation_viscosity),
           viscosity(other.viscosity),
           viscosityCoeff(other.viscosityCoeff),
           kernelSigma(other.kernelSigma),
           alpha(other.alpha),
+          eta_def(other.eta_def),
+          F_kernel(other.F_kernel),
           animateScenario(other.animateScenario),
           animationTimer(other.animationTimer),
           animationDuration(other.animationDuration),
@@ -301,6 +345,9 @@ public:
     }
 
     // Member function declarations.
+    F eps_n(F delta, F Lc) const;
+    F depsn_dDelta(F delta, F Rbar) const;
+    F depsn_dEps(F delta,F Rbar,F dRbar_dEps) const;
     void makeConfigMenu();
     std::vector<Particle2D> createRandomParticles2D();
     void updateEffectiveNeighborCounts();
@@ -325,19 +372,22 @@ public:
     void buildGridDataStructure();
     void insertParticlesIntoGrid();
     void updateNeighborLists();
+    void updateDeformationGradients();
     void updateAuxiliaryStructures();
     void colorParticleRed(int particleID);
 
     void startScenarioAnimation();
     void updateScenarioAnimation(F dt);
 
-    inline void shearFlowProfile(F y,F& v_fx,F& dvf_dy,F& d2vf_dy2);
+    void shearFlowProfile(F y,F& v_fx,F& dvf_dy,F& d2vf_dy2);
     F wrapX(F x) const;           // defined in .cpp
-    inline F periodicDx(F x1, int ix1, F x2, int ix2) const;
+    F periodicDx(F x1, int ix1, F x2, int ix2) const;
     void renormalise();
     void updateCellSizeFromParticles();
     void minParticles();
     void computeCFL ();
     void buildMassMatrix(SparseMatrixF& M) const;
+    int stride () const;
+    void rebuildGlobalVectors();
 
 };

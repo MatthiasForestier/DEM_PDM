@@ -1,6 +1,5 @@
 // main.cpp
 #include "CRLHelper/CRLApp.h"
-#include "./Projects/Template/include/App/SplashScreen.h"
 #include "./Projects/Template/include/App/ExportSimulation.h"
 
 int main() {

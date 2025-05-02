@@ -99,8 +99,8 @@ SplashScreenResult showSplashScreen() {
             // only for tunnel do we need shear / periodic parameters
             if (shapeIndex == 2) {
                 ImGui::Checkbox   ("Periodic X",       &result.periodicX);
-                ImGui::InputDouble("V₀ (max speed)",    &result.V0,           0.1, 1.0, "%.2f");
-                ImGui::InputDouble("L (half‑height)",   &result.L,            0.1, 1.0, "%.2f");
+                ImGui::InputDouble("V0 (max speed)",    &result.V0,           0.1, 1.0, "%.2f");
+                ImGui::InputDouble("L (half-height)",   &result.L,            0.1, 1.0, "%.2f");
             }
             result.scenarioShapeIndex = shapeIndex;
 

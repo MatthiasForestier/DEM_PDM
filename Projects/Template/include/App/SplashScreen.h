@@ -1,10 +1,7 @@
-#ifndef SPLASHSCREEN_H
-#define SPLASHSCREEN_H
-
 #include <memory>
-#include "SplashScreenResult.h" // Use the new header.
 #include "TemplateApp.h"        // TemplateApp will also include SplashScreenResult.h
 #include "CRLHelper/VecMatDef.h"
+
 
 // The existing function (if still needed)
 SplashScreenResult showSplashScreen();
@@ -36,4 +33,3 @@ private:
     std::shared_ptr<TemplateApp> m_templateApp;
 };
 
-#endif // SPLASHSCREEN_H

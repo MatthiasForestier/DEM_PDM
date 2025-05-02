@@ -1,15 +1,7 @@
 #include <igl/opengl/glfw/imgui/ImGuiHelpers.h>
 
 #include "Projects/Template/include/Model/MassSpring.h"
-#include "CRLHelper/MapleHelper.h"
-
-#include <Eigen/Core>
-#include <Eigen/Sparse>
-#include <algorithm>
-#include <cmath>
-#include <iostream>
-#include <random>
-#include <unordered_set>
+#include "Projects/Template/include/Model/EnergyFunctions.h"
 
 /* ------------------------------------------------------------------ */
 /*  Local helpers / constants                                          */
@@ -21,6 +13,7 @@ using Vec3  = Eigen::Matrix<F,3,1>;
 using Trip  = Eigen::Triplet<F>;
 
 inline F cube(F x)                   { return x * x * x; }
+inline F sqr(F x)                   { return x * x; }
 constexpr F oneThird   = static_cast<F>(1.0 / 3.0);
 constexpr F half       = static_cast<F>(0.5);
 constexpr F two        = static_cast<F>(2.0);
@@ -32,6 +25,41 @@ void scalarInput(const char* label, F& var, F step, const char* fmt = "%.3f")
 
 } // anonymous namespace
 
+// SDEM helpers --------------------------------------------------------------
+inline F segmentLength(F Rbar, F delta)                // eq. (55) Mollon
+{   return 2.0f * std::sqrt(Rbar * delta); }
+
+F Simulation::eps_n(F delta, F Lc) const                // eq. (54)
+{   return delta / (a*Lc + b*delta); }
+
+F Simulation::depsn_dDelta(const F delta, const F Rbar) const
+{
+    /* ε_n(δ,R̄) = δ / ( a·L_c + b·δ ) ,  L_c = 2√(R̄ δ)  */
+    const F Lc  = 2.0f * std::sqrt(Rbar * delta);
+    const F den = a * Lc + b * delta;
+    // ∂ε_n/∂δ = ( a √(R̄/δ) + b ) / (a L_c + b δ)^2  – simplified form:
+    return a * std::sqrt(Rbar * delta) / (den * den);
+}
+
+F Simulation::depsn_dEps(const F delta,
+                           const F Rbar,
+                           const F dRbar_dEps) const
+{
+    /* chain rule: ∂ε_n/∂ε = (∂ε_n/∂δ) ∂δ/∂ε + (∂ε_n/∂R̄) ∂R̄/∂ε         */
+    const F Lc   = 2.0f * std::sqrt(Rbar * delta);
+    const F den  = a * Lc + b * delta;
+
+    /* ∂ε_n/∂R̄ */
+    const F dLc_dRbar  = delta / Lc;          // since L_c = 2 √(R̄ δ)
+    const F dden_dRbar = a * dLc_dRbar;
+    const F depsn_dRbar = -delta * dden_dRbar / (den * den);
+
+    /* ∂δ/∂ε = 2 R₀/2 = R₀  (undeformed radius) * 1  */
+    const F ddelta_dEps = dRbar_dEps * 2.0f;
+
+    /* total derivative */
+    return depsn_dDelta(delta, Rbar) * ddelta_dEps + depsn_dRbar * dRbar_dEps;
+}
 /* ---------------------------------------------------------------------- */
 /*  CONFIG MENU                                                           */
 /* ---------------------------------------------------------------------- */
@@ -60,8 +88,20 @@ void Simulation::makeConfigMenu()
         scalarInput("Particle stiff k"   , interactionParam , 10.0);
         scalarInput("Viscosity c"        , viscosityCoeff   , 0.01, "%.4f");
         scalarInput("Kernel sigma"           , kernelSigma      , 0.01, "%.4f");
+        scalarInput("Young modulus" , Young   , 0.01, "%.4f");
+        scalarInput("Poisson ratio" , Poisson , 0.01, "%.4f");
+        K = Young / (3*(1-2*Poisson));
+
+        bool old = boolSoftDEM;
+        ImGui::Checkbox("Soft-DEM (1 DoF/particle)", &boolSoftDEM);
+
+        /* if the user toggled, rebuild the global state */
+        if (old != boolSoftDEM)
+            rebuildGlobalVectors();   
+            // std::cout << K << std::endl;       
     }
 }
+
 
 /* ---------------------------------------------------------------------- */
 /*  GRID / NEIGHBOUR STRUCTURES                                           */
@@ -112,10 +152,10 @@ void Simulation::insertParticlesIntoGrid()
     for (I i = 0; i < (I)particles2D.size(); ++i) {
         const Particle2D &p = particles2D[i];
         // compute world‐space AABB of this particle
-        F x0 = p.pos(0) - p.radius;
-        F x1 = p.pos(0) + p.radius;
-        F y0 = p.pos(1) - p.radius;
-        F y1 = p.pos(1) + p.radius;
+        F x0 = p.pos(0) - p.effectiveRadius();
+        F x1 = p.pos(0) + p.effectiveRadius();
+        F y0 = p.pos(1) - p.effectiveRadius();
+        F y1 = p.pos(1) + p.effectiveRadius();
 
         int minCX = (int)std::floor((x0 - minX) / cellSize);
         int maxCX = (int)std::floor((x1 - minX) / cellSize);
@@ -176,11 +216,11 @@ void Simulation::updateNeighborLists()
 
         /* bounding box in *cell* coordinates – NOT clamped */
         F cxWrapped  = periodicX ? wrapX(p.pos(0)) : p.pos(0);
-        int cxMinRaw = (int)std::floor((cxWrapped - p.radius - minX) / cellSize);
-        int cxMaxRaw = (int)std::floor((cxWrapped + p.radius - minX) / cellSize);
-        int cyMin    = std::max(0,  (int)std::floor((p.pos(1)-p.radius - minY)/cellSize));
+        int cxMinRaw = (int)std::floor((cxWrapped - p.effectiveRadius() - minX) / cellSize);
+        int cxMaxRaw = (int)std::floor((cxWrapped + p.effectiveRadius() - minX) / cellSize);
+        int cyMin    = std::max(0,  (int)std::floor((p.pos(1)-p.effectiveRadius() - minY)/cellSize));
         int cyMax    = std::min(numCellsY-1,
-                                (int)std::floor((p.pos(1)+p.radius - minY)/cellSize));
+                                (int)std::floor((p.pos(1)+p.effectiveRadius() - minY)/cellSize));
 
         /* gather candidate indices (avoid duplicates with a set) */
         std::unordered_set<int> cand;
@@ -210,48 +250,122 @@ void Simulation::updateNeighborLists()
 
             F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
             F dy = p.pos(1) - q.pos(1);
-            if (std::sqrt(dx*dx + dy*dy) < p.radius + q.radius)
+            if (std::sqrt(dx*dx + dy*dy) < p.effectiveRadius() + q.effectiveRadius())
                 p.neighborIndices.push_back(j);
         }
     }
 }
 
+void Simulation::updateDeformationGradients()
+{
+    if (!deformation_viscosity) return;          // fast exit if disabled
 
-void Simulation::updateGlobalPositions() {
-    int n = 0;
+    const F h2 = std::pow(F_kernel * maxParticleRadius, 2);
+    const F inv_dt = 1.0 / timeStep;
+
+    for (std::size_t i = 0; i < particles2D.size(); ++i)
+    {
+        auto &p = particles2D[i];
+
+        Matrix2F Apq = Matrix2F::Zero();
+        Matrix2F Aqq = Matrix2F::Zero();
+
+        /* accumulate weighted moments over neighbours of i */
+        for (I j : p.neighborIndices)
+        {
+            const auto &q = particles2D[j];
+
+            Vector2F Xij = q.X0 - p.X0;         // rest‑space offset
+            Vector2F xij = q.pos - p.pos;       // current offset
+
+            F w = std::exp( -xij.squaredNorm() / h2 );
+
+            Apq += w * (xij * Xij.transpose());
+            Aqq += w * (Xij * Xij.transpose());
+        }
+
+        /* small regulariser for robustness */
+        const F eps = 1e-6 * Aqq.trace();
+        Aqq(0,0) += eps;  Aqq(1,1) += eps;
+
+        Matrix2F F_now = Apq * Aqq.inverse();
+
+        /* rate‑of‑deformation tensor */
+        Matrix2F Fdot = (F_now - p.F_prev) * inv_dt;
+        p.D  = 0.5 * (Fdot + Fdot.transpose());
+        p.F_prev = F_now;                        // roll to next step
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  write particle data → globalPositions                             */
+/* ------------------------------------------------------------------ */
+void Simulation::updateGlobalPositions()
+{
+    int n = use3D ? int(particles3D.size())
+                  : int(particles2D.size());
+
+    const int S = stride();                     // 2 or 3
+    globalPositions.resize(S * n);
+
     if (use3D) {
-        n = static_cast<int>(particles3D.size());
+        const int n = static_cast<int>(particles3D.size());
         globalPositions.resize(DOF_FULL * n);
-        for (int i = 0; i < n; i++) {
-            globalPositions.segment<DOF_FULL>(DOF_FULL*i) = particles3D[i].pos;
-        }
-    }else{
-        n = static_cast<int>(particles2D.size());
-        globalPositions.resize(DOF * n);
-        for (int i = 0; i < n; i++) {
-            globalPositions.segment<DOF>(DOF*i) = particles2D[i].pos;
-        }
-    }
-}
 
-// Similarly, when updating particles from the global state:
-void Simulation::applyGlobalPositions(const VectorXF &positions) {
-    if (use3D) {
-        int n = static_cast<int>(particles3D.size());
-        for (int i = 0; i < n; i++) {
-            particles3D[i].pos = positions.segment<DOF_FULL>(DOF_FULL*i);
-        }
-    } else {
-        int n = (int)particles2D.size();
         for (int i = 0; i < n; ++i) {
-            particles2D[i].pos = positions.segment<DOF>(DOF*i);
+            globalPositions.segment<DOF_FULL>(DOF_FULL * i) = particles3D[i].pos;
+        }
+        return;
+    }
+    else {
+        for (int i = 0; i < n; ++i)
+        {
+            const Particle2D &p = particles2D[i];
 
-            if (periodicX)   // keep it canonical
-                particles2D[i].pos(0) = wrapX(particles2D[i].pos(0));
+            /* x , y */
+            globalPositions.segment( S*i, DOF) = p.pos;
+
+            /* optional ε_V */
+            if (boolSoftDEM)
+                globalPositions[S*i + 2] = p.epsV;
         }
     }
-    
 }
+
+/* ------------------------------------------------------------------ */
+/*  read → particles                                                  */
+/* ------------------------------------------------------------------ */
+void Simulation::applyGlobalPositions(const VectorXF &P)
+{
+    if (use3D) {
+        const int n = static_cast<int>(particles3D.size());
+        for (int i = 0; i < n; ++i)
+            particles3D[i].pos = P.segment<DOF_FULL>(DOF_FULL * i);
+        return;
+    }
+    else {
+        int n = int(particles2D.size());
+        const int S = stride();
+
+        for (int i = 0; i < n; ++i)
+        {
+            Particle2D &p = particles2D[i];
+
+            /* x , y (always) */
+            p.pos = P.segment( S*i, DOF);
+
+            if (periodicX)
+                p.pos(0) = wrapX(p.pos(0));
+
+            /* ε_V if present */
+            if (boolSoftDEM)
+                p.epsV = P[S*i + 2];
+            else
+                p.epsV = 0.0;                     // muted
+        }
+    }
+}
+
 
 VectorXF Simulation::getGlobalState() {
     updateGlobalPositions();
@@ -268,7 +382,65 @@ void Simulation::updateAuxiliaryStructures() {
     // Build the grid and update neighbor lists based on the current particle positions.
     insertParticlesIntoGrid();
     updateNeighborLists();
+    // updateDeformationGradients();
 }
+
+void Simulation::rebuildGlobalVectors()
+{
+    /* ------------------------------------------------------------------ */
+    /* 0) cache the old global state (whatever layout it had)             */
+    /* ------------------------------------------------------------------ */
+    VectorXF oldState = getGlobalState();          // uses *old* stride
+    const int Sold    = boolSoftDEM ? 2 : 3;       // old stride (before toggle)
+
+    /* ------------------------------------------------------------------ */
+    /* 1) update stride after the flag has been flipped outside           */
+    /* ------------------------------------------------------------------ */
+    const int Snew = stride();                     // 2 or 3
+
+    /* ------------------------------------------------------------------ */
+    /* 2) resize globalPositions and repack x , y ( + ε_V if active )     */
+    /* ------------------------------------------------------------------ */
+    const int n = static_cast<int>(particles2D.size());
+    globalPositions.setZero(Snew * n);
+
+    for (int i = 0; i < n; ++i)
+    {
+        /* copy back x , y ------------------------------------------------ */
+        globalPositions.segment<2>(Snew * i) =            // always 2 entries
+            oldState.segment<2>(Sold * i);
+
+        /* set / reset ε_V ------------------------------------------------- */
+        if (boolSoftDEM) {
+            //  old version may or may not have ε_V – treat missing as 0
+            F epsOld = (Sold > 2) ? oldState(Sold * i + 2) : F(0);
+            particles2D[i].epsV = epsOld;                 // keep continuity
+            globalPositions(Snew * i + 2) = epsOld;
+        } else {
+            particles2D[i].epsV = F(0);                   // mute deformation
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 3) history buffers, mass-matrix, neighbour structures, CFL …       */
+    /* ------------------------------------------------------------------ */
+    globalState_1 = globalPositions;
+    globalState_2 = globalPositions;
+
+    /* mass matrix (diagonal) */
+    buildMassMatrix(M);
+
+    /* neighbour lists depend only on geometry (unchanged) but            */
+    /* grid cell width uses the new *physical* radii → recompute          */
+    updateCellSizeFromParticles();
+    buildGridDataStructure();
+    insertParticlesIntoGrid();
+    updateNeighborLists();
+
+    /*  keep CFL diagnostic up-to-date                                    */
+    minParticles();
+}
+
 
 /* -------------------------------------------------------------------------- */
 /*  ENERGY                                                                    */
@@ -292,234 +464,101 @@ void Simulation::compute_energy(F &value) const
                         ? F(0)                       /* fallback datum       */
                         : scenarioObjects[0]->getBoundingBox().min_y;
 
-            const F mgy = (dynamic ? p.mass : F(1)) * gravity(1)
-                        * (p.pos(1) - y0);
-
-            value += mgy;
+            value += EnergyFunctions::gravity(p, *this, y0);
         }
-
-        /* -------------------- boundary objects --------------------------- */
-        if (p.BoundaryCollision == 1)                       /* CIRCLE wall  */
-        {
-            const F px = p.pos(0),  py = p.pos(1),  r = p.radius;
-
-            for (const auto &so : scenarioObjects)
-                if (auto *c = dynamic_cast<Circle*>(so.get()))
-                {
-                    const F dx   = px - c->position(0);
-                    const F dy   = py - c->position(1);
-                    const F dist = std::sqrt(dx*dx + dy*dy);
-
-                    F depth = dist + r - c->radius;          // δ
-                    if (depth <= F(0)) continue;
-
-                    value += oneThird * overlapParam * cube(depth);
-                }
+        /* volumetric strain energy ----------------- */
+        if (boolSoftDEM)
+        { 
+            value += EnergyFunctions::volumetricStrain(p, *this);
         }
-        else if (p.BoundaryCollision == 2)                   /* SQUARE wall */
-        {
-            const F px = p.pos(0),  py = p.pos(1),  r = p.radius;
-
-            for (const auto &so : scenarioObjects)
-                if (auto *sq = dynamic_cast<Square*>(so.get()))
-                {
-                    /* face–wise overlaps (δ ≥ 0) -------------------------- */
-                    const F δxL = sq->min_x - (px - r);
-                    const F δxR = (px + r) - sq->max_x;
-                    const F δyB = sq->min_y - (py - r);
-                    const F δyT = (py + r) - sq->max_y;
-
-                    const F δx = (δxR > 0 ? δxR : (δxL > 0 ? δxL : F(0)));
-                    const F δy = (δyT > 0 ? δyT : (δyB > 0 ? δyB : F(0)));
-
-                    if (δx==0 && δy==0) continue;
-
-                    /* single face  →  δ = n    (because n=δ)               */
-                    /* corner       →  n = √(δx²+δy²)                       */
-                    const F n = std::sqrt(δx*δx + δy*δy);
-
-                    value += oneThird * overlapParam * cube(n);
-                }
-        }
-        else if (p.BoundaryCollision == 3)                   /* TUNNEL top/bot */
-        {
-            const F py = p.pos(1),  r = p.radius;
-
-            for (const auto &so : scenarioObjects)
-                if (auto *tu = dynamic_cast<Tunnel2D*>(so.get()))
-                {
-                    F δ = F(0);
-                    if (py - r < tu->BB.min_y)       δ = tu->BB.min_y - (py - r);
-                    else if (py + r > tu->BB.max_y)  δ = (py + r) - tu->BB.max_y;
-
-                    if (δ > 0)
-                        value += oneThird * overlapParam * cube(δ);
-                }
-        }
+        /* ----------------- boundary energy ----------------- */
+        value += EnergyFunctions::boundaryEnergy(p, *this);
     }
 
-    /* ------------------- inter–particle contacts ------------------------- */
+    /*  -------------inter-particle contacts--------------------------------*/
     for (std::size_t i = 0; i < particles2D.size(); ++i)
     {
         const Particle2D &p = particles2D[i];
 
-        for (int j : p.neighborIndices)           /* j > i by construction */
+        for (int j : p.neighborIndices)
         {
+            if (j <= (int)i) continue;
             const Particle2D &q = particles2D[j];
 
-            /* periodic dx so cell lists work                                    */
-            const F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
-            const F dy = p.pos(1) - q.pos(1);
-            const F d  = std::sqrt(dx*dx + dy*dy);
-
-            const F δ = (p.radius + q.radius) - d;         /* overlap */
-            if (δ <= F(0)) continue;
-
-            value += oneThird * interactionParam * cube(δ);
+            if (!boolSoftDEM)
+                value += EnergyFunctions::interParticleOld(p, q, *this);
+            else
+                value += EnergyFunctions::interParticleSoft(p, q, *this);
         }
     }
 
     /* ------------- pin spring (prevent rigid motion) -------------------- */
     if (periodicX && !particles2D.empty())
     {
-        const F dx0 = particles2D[0].pos(0) - pinXref;
-        value += F(0.5) * pinK * dx0 * dx0;
+        value += EnergyFunctions::pinSpring(*this);
     }
 }
 
 /* -------------------------------------------------------------------------- */
 /*  GRADIENT                                                                  */
 /* -------------------------------------------------------------------------- */
-void Simulation::compute_gradient(VectorXF &g) const
-{
-    g.resize(DOF * particles2D.size());
-    g.setZero(); 
 
-    for (std::size_t ii = 0; ii < particles2D.size(); ++ii)
-    {
+void Simulation::compute_gradient(VectorXF &g) const {
+    const int S = stride();
+    g.resize(S * particles2D.size());
+    g.setZero();
+
+    // per-particle terms
+    for (size_t ii = 0; ii < particles2D.size(); ++ii) {
         Particle2D p = particles2D[ii];
         detectBoundaryCollision2D(p);
 
-        const int xIdx = DOF*ii;
-        const int yIdx = xIdx + 1;
-
-        /* gravity ---------------------------------------------------------- */
+        int xIdx = S*ii, yIdx = xIdx+1, epsIdx = xIdx+2;
+        // gravity
         if (experiment == Experiment::Default)
-            g[yIdx] += (dynamic ? p.mass : F(1)) * gravity(1);
+            g[yIdx] += GradientFunctions::gravityGradient(p, *this);
 
-        /* ----------------------------- CIRCLE wall ----------------------- */
-        if (p.BoundaryCollision == 1)
-        {
-            const F px = p.pos(0), py = p.pos(1), r = p.radius;
+        // volumetric
+        if (boolSoftDEM)
+            g[epsIdx] += GradientFunctions::volumetricStrainGradient(p, *this);
 
-            for (const auto &so : scenarioObjects)
-                if (auto *c = dynamic_cast<Circle*>(so.get()))
-                {
-                    const F dx = px - c->position(0);
-                    const F dy = py - c->position(1);
-                    const F dist2 = dx*dx + dy*dy;
-                    if (dist2 == F(0)) continue;
+        // boundary
+        F fx, fy, feps;
+        GradientFunctions::boundaryGradient(p, *this, fx, fy, feps);
+        g[xIdx]   += fx;
+        g[yIdx]   += fy;
+        if (boolSoftDEM) g[epsIdx] += feps;
+    }
 
-                    const F dist  = std::sqrt(dist2);
-                    const F depth = dist + r - c->radius;          /* δ */
-                    if (depth <= F(0)) continue;
+    // inter-particle
+    for (size_t i = 0; i < particles2D.size(); ++i) {
+        auto &p = particles2D[i];
+        int ix = S*i, iy = ix+1, ie = ix+2;
 
-                    const F kΔ2_over_d = overlapParam * depth * depth / dist;
+        for (int j : p.neighborIndices) {
+            if (j <= (int)i) continue;
+            auto &q = particles2D[j];
+            int jx = S*j, jy = jx+1, je = jx+2;
 
-                    g[xIdx] += kΔ2_over_d * dx;
-                    g[yIdx] += kΔ2_over_d * dy;
-                }
-        }
-        /* ----------------------------- SQUARE wall ----------------------- */
-        else if (p.BoundaryCollision == 2)
-        {
-            const F px = p.pos(0), py = p.pos(1), r = p.radius;
-
-            for (const auto &so : scenarioObjects)
-                if (auto *sq = dynamic_cast<Square*>(so.get()))
-                {
-                    const F δxL = sq->min_x - (px - r);
-                    const F δxR = (px + r) - sq->max_x;
-                    const F δyB = sq->min_y - (py - r);
-                    const F δyT = (py + r) - sq->max_y;
-
-                    F δx = F(0), δy = F(0);
-                    int sx = 0, sy = 0;
-
-                    if (δxR > 0)      { δx = δxR;  sx = +1; }
-                    else if (δxL > 0) { δx = δxL;  sx = -1; }
-
-                    if (δyT > 0)      { δy = δyT;  sy = +1; }
-                    else if (δyB > 0) { δy = δyB;  sy = -1; }
-
-                    if (δx==0 && δy==0) continue;
-
-                    if (δx>0 && δy>0)                        /* CORNER */
-                    {
-                        const F n = std::sqrt(δx*δx + δy*δy);
-                        const F coef = overlapParam * n;
-
-                        g[xIdx] += coef * sx * δx;
-                        g[yIdx] += coef * sy * δy;
-                    }
-                    else                                     /* SINGLE */
-                    {
-                        if (δx > 0) g[xIdx] += sx * overlapParam * δx * δx;
-                        if (δy > 0) g[yIdx] += sy * overlapParam * δy * δy;
-                    }
-                }
-        }
-        /* ----------------------------- TUNNEL ---------------------------- */
-        else if (p.BoundaryCollision == 3)
-        {
-            const F py = p.pos(1), r = p.radius;
-
-            for (const auto &so : scenarioObjects)
-                if (auto *tu = dynamic_cast<Tunnel2D*>(so.get()))
-                {
-                    F δ = F(0);  int sy = 0;
-                    if (py - r < tu->BB.min_y)      { δ = tu->BB.min_y - (py - r); sy = -1; }
-                    else if (py + r > tu->BB.max_y) { δ = (py + r) - tu->BB.max_y; sy = +1; }
-
-                    if (δ > 0)
-                        g[yIdx] += overlapParam * sy * δ * δ;
-                }
+            if (!boolSoftDEM) {
+                auto [fx,fy] = GradientFunctions::interParticleOldGradient(p, q, *this);
+                g[ix] += fx;  g[iy] += fy;
+                g[jx] -= fx;  g[jy] -= fy;
+            } else {
+                auto [fx, fy, feps_i, feps_j]
+                    = GradientFunctions::interParticleSoftGradient(p, q, *this);
+                g[ix] += fx;    g[iy] += fy;
+                g[jx] -= fx;    g[jy] -= fy;
+                g[ie] += feps_i;
+                g[je] += feps_j;
+            }
         }
     }
 
-    /* --------------------- inter-particle overlaps ----------------------- */
-    for (std::size_t i = 0; i < particles2D.size(); ++i)
-    {
-        const Particle2D &p = particles2D[i];
-        const int ix = DOF*i, iy = ix+1;
-
-        for (int j : p.neighborIndices)
-        {
-            if (j <= static_cast<int>(i)) continue;
-            const Particle2D &q = particles2D[j];
-
-            const F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
-            const F dy = p.pos(1) - q.pos(1);
-            const F dist2 = dx*dx + dy*dy;
-            if (dist2 == F(0)) continue;
-
-            const F dist = std::sqrt(dist2);
-            const F δ    = (p.radius + q.radius) - dist;
-            if (δ <= F(0)) continue;
-
-            const F kΔ2_over_d = interactionParam * δ * δ / dist;
-
-            const F gx = kΔ2_over_d * dx;
-            const F gy = kΔ2_over_d * dy;
-
-            g[ix] -= gx;  g[iy] -= gy;          /* particle i  */
-            g[DOF*j] += gx; g[DOF*j+1] += gy;   /* particle j  */
-        }
+    // pin spring
+    if (periodicX && !particles2D.empty()) {
+        g[0] += GradientFunctions::pinSpringGradient(*this);
     }
-
-    /* spring pin in x ------------------------------------------------------ */
-    if (periodicX && !particles2D.empty())
-        g[0] += pinK * (particles2D[0].pos(0) - pinXref);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -528,244 +567,117 @@ void Simulation::compute_gradient(VectorXF &g) const
 /* -------------------------------------------------------------------------- */
 void Simulation::compute_hessian(SparseMatrixF &H) const
 {
-    const int N = DOF * particles2D.size();
-    H.resize(N, N);  H.setZero();
+  const int S = stride();
+  const int N = S * (int)particles2D.size();
+  H.resize(N,N);
+  H.setZero();
 
-    /* lambda to accumulate entries ---------------------------------------- */
-    auto add = [&](int r,int c,F v){ H.coeffRef(r,c) += v; };
+  auto add = [&](int r,int c,F v){
+    H.coeffRef(r,c) += v;
+  };
 
-    /* --------------------------- boundary walls -------------------------- */
-    for (std::size_t ii = 0; ii < particles2D.size(); ++ii)
-    {
-        Particle2D p = particles2D[ii];
-        detectBoundaryCollision2D(p);
+  // 1) boundary walls
+  for (int i = 0; i < (int)particles2D.size(); ++i) {
+    Particle2D p = particles2D[i];
+    detectBoundaryCollision2D(p);
+    HessianFunctions::boundaryHessian(p, *this, i, add);
+  }
 
-        const int xIdx = DOF*ii;
-        const int yIdx = xIdx+1;
-
-        /* --------------------------- CIRCLE ----------------------------- */
-        if (p.BoundaryCollision == 1)
-        {
-            const F px = p.pos(0), py = p.pos(1), r = p.radius;
-        
-            for (const auto &so : scenarioObjects)
-                if (auto *c = dynamic_cast<Circle *>(so.get()))
-                {
-                    const F dx   = px - c->position(0);
-                    const F dy   = py - c->position(1);
-                    const F d2   = dx*dx + dy*dy;
-                    if (d2 <= tiny) continue;                 // centres coincide
-        
-                    const F  d   = std::sqrt(d2);
-                    const F  δ   = d + r - c->radius;         // penetration
-                    if (δ <= F(0)) continue;
-        
-                    const F kΔ   = overlapParam * δ;          // k Δ
-                    const F kΔ2  = kΔ * δ;                    // k Δ²
-        
-                    const F invD2 = F(1) / d2;
-                    const F invD3 = invD2 / d;
-                    const F kΔ2_over_d = kΔ2 / d;             // common c₁ = kΔ²/d
-        
-                    /* pre-squared helpers */
-                    const F dx2 = dx*dx, dy2 = dy*dy, dxy = dx*dy;
-        
-                    /* Hessian entries (see Maple) */
-                    const F Hxx = 2.0 * dx2 * invD2 * kΔ    //  + 2 kΔ (dx/d)²
-                                -       dx2 * invD3 * kΔ2   //  − kΔ² dx² / d³
-                                + kΔ2_over_d;               //  + kΔ² / d
-        
-                    const F Hyy = 2.0 * dy2 * invD2 * kΔ
-                                -       dy2 * invD3 * kΔ2
-                                + kΔ2_over_d;
-        
-                    const F Hxy = 2.0 * dxy * invD2 * kΔ
-                                -       dxy * invD3 * kΔ2;
-        
-                    add(xIdx, xIdx, Hxx);  add(yIdx, yIdx, Hyy);
-                    add(xIdx, yIdx, Hxy);  add(yIdx, xIdx, Hxy);   // symmetry
-                }
-        }
-        /* --------------------------- SQUARE ----------------------------- */
-        else if (p.BoundaryCollision == 2)
-        {
-            const F px = p.pos(0), py = p.pos(1), r = p.radius;
-
-            for (const auto &so : scenarioObjects)
-                if (auto *sq = dynamic_cast<Square*>(so.get()))
-                {
-                    const F δxL = sq->min_x - (px - r);
-                    const F δxR = (px + r) - sq->max_x;
-                    const F δyB = sq->min_y - (py - r);
-                    const F δyT = (py + r) - sq->max_y;
-
-                    F δx = F(0), δy = F(0);
-                    if (δxR > 0)      δx = δxR;
-                    else if (δxL > 0) δx = δxL;
-
-                    if (δyT > 0)      δy = δyT;
-                    else if (δyB > 0) δy = δyB;
-
-                    if (δx==0 && δy==0) continue;
-
-                    const F k = overlapParam;
-
-                    if (δx>0 && δy>0)                            /* CORNER */
-                    {
-                        const F n     = std::sqrt(δx*δx + δy*δy);
-                        const F inv_n = F(1) / n;
-                        const F Hxx = k * ( n + δx*δx*inv_n );
-                        const F Hyy = k * ( n + δy*δy*inv_n );
-                        const F Hxy = k * ( δx*δy*inv_n );
-
-                        add(xIdx,xIdx,Hxx); add(yIdx,yIdx,Hyy);
-                        add(xIdx,yIdx,Hxy); add(yIdx,xIdx,Hxy);
-                    }
-                    else                                          /* FACE  */
-                    {
-                        if (δx>0) add(xIdx,xIdx, 2.0 * k * δx);
-                        if (δy>0) add(yIdx,yIdx, 2.0 * k * δy);
-                    }
-                }
-        }
-        /* --------------------------- TUNNEL ----------------------------- */
-        else if (p.BoundaryCollision == 3)
-        {
-            const F py = p.pos(1), r = p.radius;
-
-            for (const auto &so : scenarioObjects)
-                if (auto *tu = dynamic_cast<Tunnel2D*>(so.get()))
-                {
-                    F δ = F(0);
-                    if (py - r < tu->BB.min_y)      δ = tu->BB.min_y - (py - r);
-                    else if (py + r > tu->BB.max_y) δ = (py + r) - tu->BB.max_y;
-
-                    if (δ > 0) add(yIdx,yIdx, 2.0 * overlapParam * δ);
-                }
-        }
+  // 2) inter‐particle
+  for (int i = 0; i < (int)particles2D.size(); ++i) {
+    for (int j : particles2D[i].neighborIndices) {
+      if (j <= i) continue;
+      if (!boolSoftDEM){
+        HessianFunctions::interParticleOldHessian(
+            particles2D[i], particles2D[j], *this, i, j, add);
+      }else{
+        HessianFunctions::interParticleSoftHessian(
+            particles2D[i], particles2D[j], *this, i, j, add);
+      }
     }
+  }
 
-    /* ----------------------- inter-particle blocks ----------------------- */
-    for (std::size_t i = 0; i < particles2D.size(); ++i)
-    {
-        const Particle2D &p = particles2D[i];
-        const int ix = DOF*i, iy = ix+1;
-
-        for (int j : p.neighborIndices)
-        {
-            if (j <= static_cast<int>(i)) continue;
-            const Particle2D &q = particles2D[j];
-
-            const F dx = periodicDx(p.pos(0), p.ix, q.pos(0), q.ix);
-            const F dy = p.pos(1) - q.pos(1);
-            const F d2 = dx*dx + dy*dy;
-            if (d2 == F(0)) continue;
-
-            const F d  = std::sqrt(d2);
-            const F δ  = (p.radius + q.radius) - d;
-            if (δ <= F(0)) continue;
-
-            const F kΔ  = interactionParam * δ;
-            const F kΔ2 = kΔ * δ;
-
-            const F invD2 = F(1)/d2;
-            const F invD3 = invD2 / d;
-
-            const F fac1 = 2.0 * kΔ  * invD2;
-            const F fac2 =       kΔ2 * invD3;
-            const F T27  =       kΔ2 /  d;
-
-            const F dx2=dx*dx, dy2=dy*dy, dxy=dx*dy;
-
-            const F Hii_xx = fac1*dx2 + fac2*dx2 - T27;
-            const F Hii_yy = fac1*dy2 + fac2*dy2 - T27;
-            const F Hii_xy = fac1*dxy + fac2*dxy;
-
-            const F Hij_xx = -Hii_xx;
-            const F Hij_yy = -Hii_yy;
-            const F Hij_xy = -Hii_xy;
-
-            const int jx = DOF*j, jy = jx+1;
-
-            /* i-block */
-            add(ix,ix,Hii_xx); add(iy,iy,Hii_yy);
-            add(ix,iy,Hii_xy); add(iy,ix,Hii_xy);
-
-            /* j-block */
-            add(jx,jx,Hii_xx); add(jy,jy,Hii_yy);
-            add(jx,jy,Hii_xy); add(jy,jx,Hii_xy);
-
-            /* i–j off-diagonal */
-            add(ix,jx,Hij_xx); add(jx,ix,Hij_xx);
-            add(ix,jy,Hij_xy); add(jy,ix,Hij_xy);
-            add(iy,jx,Hij_xy); add(jx,iy,Hij_xy);
-            add(iy,jy,Hij_yy); add(jy,iy,Hij_yy);
-        }
-    }
-
-    /* spring pin in x ------------------------------------------------------ */
-    if (periodicX && !particles2D.empty())
-        add(0,0,pinK);
+  // 3) pin spring
+  HessianFunctions::pinSpringHessian(*this, add);
 }
 
-void Simulation::compute_energy_dyn(F &value) {
-
+/* ======================================================================= */
+/*  DYNAMIC  ENERGY                                                        */
+/* ======================================================================= */
+void Simulation::compute_energy_dyn(F& value)
+{
+    /* --- static part ---------------------------------------------------- */
     compute_energy(value);
-    /* make sure previous states exist -------------------------------------- */
+
+    /* -------------------------------------------------------------------- */
+    /*  make sure history vectors have the right size                       */
+    /* -------------------------------------------------------------------- */
     if (globalState_1.size() != globalPositions.size()) {
         globalState_1 = globalPositions;
         globalState_2 = globalPositions;
     }
 
-    /* 3) Δ²-like difference  a = xⁿ⁺¹ − 2xⁿ + xⁿ⁻¹ ----------------------- */
+    /* Δ²-like difference  a = xⁿ⁺¹ − 2xⁿ + xⁿ⁻¹ ------------------------- */
     const VectorXF a = globalPositions
                      - 2 * globalState_1
                      + globalState_2;
 
     const F inv_h2 = 1.0 / (timeStep * timeStep);
 
-    /* ½/h² · aᵀ M a ------------------------------------------------------- */
-    value += 0.5 * inv_h2 * a.dot(M * a);
+    /* ½/h² · aᵀ M a  (M already includes the ε_V row when Soft-DEM on)   */
+    value += half * inv_h2 * a.dot(M * a);
 
+    /* ---------------------------------------------------------------- */
+    /*  neighbour-dependent dash-pot (x,y only, same as before)         */
+    /* ---------------------------------------------------------------- */
     if (viscosity) {
-        for (size_t i = 0; i < particles2D.size(); i++) {
-            // Use the filtered effective neighbor count stored in the particle.
-            F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
-            VectorXF diff = globalPositions.segment(DOF * i, DOF) - 
-                            globalState_1.segment(DOF * i, DOF);
-            value += 0.5 * viscosityCoeff * effectiveCountFiltered / (timeStep * timeStep) * diff.squaredNorm();
+        const int S = stride();                 // 2 or 3
+        for (size_t i = 0; i < particles2D.size(); ++i) {
+            F nEff = particles2D[i].prevEffectiveCount;
+
+            VectorXF diff = globalPositions.segment(S * i, DOF)      // x,y
+                          - globalState_1.segment(S * i, DOF);
+
+            value += half * viscosityCoeff * nEff * inv_h2 * diff.squaredNorm();
         }
     }
-    if (experiment == Experiment::ShearFlow)
-    {
-        for (int i = 0; i < (int)particles2D.size(); ++i)
-        {
-            const int base = DOF * i;
 
-            /* current & previous positions */
+    if (deformation_viscosity) {
+        for (auto &p : particles2D)
+            value += EnergyDynFunctions::deformationViscous(p, *this);
+    }
+    
+
+    /* ----------------------------- shear-flow drag -------------------- */
+    if (experiment == Experiment::ShearFlow) {
+        for (int i = 0; i < (int)particles2D.size(); ++i) {
+            const int base = stride() * i;          // works for 2 or 3 DOF
+
             F x1 = globalPositions(base    );
             F y1 = globalPositions(base + 1);
             F x0 = globalState_1  (base    );
             F y0 = globalState_1  (base + 1);
 
-            /* fluid velocity */
             F vfx , dvf_dy , dummy;
             shearFlowProfile(y1, vfx, dvf_dy, dummy);
 
-            /* particle velocity components */
-            F dvx = (x1 - x0)/timeStep - vfx;
-            F dvy = (y1 - y0)/timeStep;
+            F dvx = (x1 - x0) / timeStep - vfx;
+            F dvy = (y1 - y0) / timeStep;
 
-            value += 0.5 * fluidViscosity *
-                     (dvx*dvx + dvy*dvy);
+            value += half * fluidViscosity * (dvx*dvx + dvy*dvy);
         }
     }
-    
 }
 
-void Simulation::compute_gradient_dyn(VectorXF &gradient) {
-    
-    compute_gradient(gradient);
+
+/* ======================================================================= */
+/*  DYNAMIC  GRADIENT                                                      */
+/* ======================================================================= */
+void Simulation::compute_gradient_dyn(VectorXF& grad)
+{
+    /* static part -------------------------------------------------------- */
+    compute_gradient(grad);
+
     if (globalState_1.size() != globalPositions.size()) {
         globalState_1 = globalPositions;
         globalState_2 = globalPositions;
@@ -774,126 +686,137 @@ void Simulation::compute_gradient_dyn(VectorXF &gradient) {
     const VectorXF a      = globalPositions
                           - 2 * globalState_1
                           + globalState_2;
-    const F        inv_h2 = 1.0 / (timeStep * timeStep);
+    const F inv_h2 = 1.0 / (timeStep * timeStep);
 
-    /* ∇E_dyn = 1/h² · M a -------------------------------------------------- */
-    gradient += inv_h2 * (M * a);
-    
+    /* 1/h² · M a --------------------------------------------------------- */
+    grad += inv_h2 * (M * a);
+
+    /* neighbour-dependent dash-pot (x,y only) --------------------------- */
     if (viscosity) {
-        for (size_t i = 0; i < particles2D.size(); i++) {
-            F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
-            gradient.segment(DOF * i, DOF) += viscosityCoeff * effectiveCountFiltered / (timeStep * timeStep) *
-                                          (globalPositions.segment(DOF * i, DOF) - 
-                                           globalState_1.segment(DOF * i, DOF));
+        const int S = stride();
+        for (size_t i = 0; i < particles2D.size(); ++i) {
+            F nEff = particles2D[i].prevEffectiveCount;
+            grad.segment(S * i, DOF) += viscosityCoeff * nEff * inv_h2 *
+                                         (globalPositions.segment(S * i, DOF) -
+                                          globalState_1  .segment(S * i, DOF));
         }
     }
-    if (experiment == Experiment::ShearFlow)
-    {
+
+    if (deformation_viscosity) {
+        if (deformation_viscosity) {
+            const int S = stride();
+            for (int i = 0; i < (int)particles2D.size(); ++i) {
+              F fx, fy, fe;
+              GradientDynFunctions::deformationViscous(particles2D[i], *this, fx, fy, fe);
+              grad[S*i+0] += fx;
+              grad[S*i+1] += fy;
+              if (S==3)    grad[S*i+2] += fe;
+            }
+        }
+    }
+
+    /* shear-flow drag ---------------------------------------------------- */
+    if (experiment == Experiment::ShearFlow) {
         const F nu      = fluidViscosity;
         const F inv_dt  = 1.0 / timeStep;
-        const F nu_over_dt  = nu * inv_dt;
-        const F nu_over_dt2 = nu * inv_dt * inv_dt;
+        const int S     = stride();
 
-        for (int i = 0; i < (int)particles2D.size(); ++i)
-        {
-            const int base = DOF * i;
+        for (int i = 0; i < (int)particles2D.size(); ++i) {
+            const int base = S * i;
 
-            /* positions */
             F x1 = globalPositions(base    );
             F y1 = globalPositions(base + 1);
             F x0 = globalState_1  (base    );
             F y0 = globalState_1  (base + 1);
 
-            /* fluid profile & derivative */
             F vfx , dvf_dy , dummy;
             shearFlowProfile(y1, vfx, dvf_dy, dummy);
 
-            /* velocity differences */
-            F dvx = (x1 - x0)*inv_dt - vfx;   // (v_p − v_f)_x
-            F dvy = (y1 - y0)*inv_dt;         // v_p,y
+            F dvx = (x1 - x0)*inv_dt - vfx;
+            F dvy = (y1 - y0)*inv_dt;
 
-            // -------- grad_x --------
-            gradient(base) += nu_over_dt * dvx;
-
-            // -------- grad_y --------
-            gradient(base + 1) += nu_over_dt * dvy  // from v_p,y
-                                - nu * dvx * dvf_dy; // from v_f(y)
+            grad(base    ) += nu * dvx * inv_dt;             // ∂E/∂x
+            grad(base + 1) += nu * dvy * inv_dt
+                             - nu * dvx * dvf_dy;            // ∂E/∂y
         }
     }
-    
-    
 }
 
-void Simulation::compute_hessian_dyn(SparseMatrixF &hessian) {
 
-    compute_hessian(hessian);
+/* ======================================================================= */
+/*  DYNAMIC  HESSIAN                                                       */
+/* ======================================================================= */
+void Simulation::compute_hessian_dyn(SparseMatrixF& H)
+{
+    /* static part -------------------------------------------------------- */
+    compute_hessian(H);
+
     const F inv_h2 = 1.0 / (timeStep * timeStep);
 
-    /* H += 1/h² · M  (diagonal, so this is cheap) ------------------------- */
-    hessian += inv_h2 * M; 
-    
+    /* add 1/h² · M (diagonal) ------------------------------------------- */
+    H += inv_h2 * M;
+
+    /* neighbour-dependent dash-pot (diag on x,y) ------------------------ */
     if (viscosity) {
-        for (size_t i = 0; i < particles2D.size(); i++) {
-            F effectiveCountFiltered = particles2D[i].prevEffectiveCount;
-            for (int j = 0; j < DOF; j++) {
-                int index = static_cast<int>(DOF * i + j);
-                hessian.coeffRef(index, index) += viscosityCoeff * effectiveCountFiltered / (timeStep * timeStep);
+        const int S = stride();
+        for (size_t i = 0; i < particles2D.size(); ++i) {
+            F nEff = particles2D[i].prevEffectiveCount;
+            const F coeff = viscosityCoeff * nEff * inv_h2;
+
+            for (int d = 0; d < DOF; ++d) {          // x,y only
+                int id = int(S * i + d);
+                H.coeffRef(id, id) += coeff;
             }
         }
     }
-    if (experiment == Experiment::ShearFlow)
-    {
-        const F nu       = fluidViscosity;
-        const F inv_dt   = 1.0 / timeStep;
-        const F nu_dt2   = nu * inv_dt * inv_dt;
-        const F k        = M_PI / L;           // π/L
 
+
+    if (deformation_viscosity) {
         for (int i = 0; i < (int)particles2D.size(); ++i)
-        {
-            const int base = DOF * i;
+            HessianDynFunctions::deformationViscous(particles2D[i], *this, i,
+                                                    [&](int r,int c,F v){ H.coeffRef(r,c) += v; });
+    }
 
-            /* positions & velocities */
+    /* shear-flow contribution ------------------------------------------- */
+    if (experiment == Experiment::ShearFlow) {
+        const F nu     = fluidViscosity;
+        const F inv_dt = 1.0 / timeStep;
+        const F k      = M_PI / L;
+        const int S    = stride();
+
+        for (int i = 0; i < (int)particles2D.size(); ++i) {
+            const int base = S * i;
+
             F x1 = globalPositions(base    );
             F y1 = globalPositions(base + 1);
             F x0 = globalState_1  (base    );
 
-            F sin_k_y , cos_k_y;
-            {
-                F vfx , dvf_dy , d2vf_dy2;
-                shearFlowProfile(y1, vfx, dvf_dy, d2vf_dy2);
-                sin_k_y = std::sin(k*y1);
-                cos_k_y = std::cos(k*y1);
-            }
+            /* v_f and derivatives */
+            F vfx , dvf_dy , d2vf_dy2;
+            shearFlowProfile(y1, vfx, dvf_dy, d2vf_dy2);
 
-            /* pre‑compute   dvx   */
-            F dvx = (x1 - x0)*inv_dt - V0*sin_k_y;
+            F sin_k_y = std::sin(k * y1);
+            F cos_k_y = std::cos(k * y1);
+            F dvx     = (x1 - x0)*inv_dt - V0*sin_k_y;
 
-            /* ===== diagonal blocks ===== */
-            hessian.coeffRef(base    , base    ) += nu_dt2;   // d²E/dx²
+            /* diagonal -------------------------------------------------- */
+            H.coeffRef(base, base) += nu * inv_dt * inv_dt;          // d²E/dx²
 
-            /* d²E/dy² :
-               nu_dt2  from v_p,y term
-             + nu * (V0 k)^2 * cos²(·)   from ∂dvx/∂y
-             + nu * dvx * V0 * k^2 * sin(·)   from ∂²v_f/∂y²
-            */
-            F term1 = nu_dt2;
-            F term2 = nu * (V0*V0) * k*k * cos_k_y*cos_k_y;
-            F term3 = nu * dvx * V0 * k*k * sin_k_y;
-            hessian.coeffRef(base + 1, base + 1) += term1 + term2 + term3;
+            F term1 = nu * inv_dt * inv_dt;                          // from v_p,y
+            F term2 = nu * (V0*V0) * k*k * cos_k_y * cos_k_y;        // ∂dvx/∂y
+            F term3 = nu * dvx * V0 * k*k * sin_k_y;                 // 2nd deriv
+            H.coeffRef(base + 1, base + 1) += term1 + term2 + term3;
 
-            /* ===== off‑diagonal  d²E/dxdy  (symmetric) =====
-               ∂grad_x/∂y = nu * (-V0 k cos) / dt
-            */
+            /* off-diag (symmetric) ------------------------------------ */
             F off = -nu * V0 * k * cos_k_y * inv_dt;
-            hessian.coeffRef(base    , base + 1) += off;
-            hessian.coeffRef(base + 1, base    ) += off;
+            H.coeffRef(base,     base + 1) += off;
+            H.coeffRef(base + 1, base    ) += off;
         }
     }
-    
-    
 }
 
-inline void Simulation::shearFlowProfile(F y,
+
+void Simulation::shearFlowProfile(F y,
     F& v_fx,      //  sin(π y/L)
     F& dvf_dy,    //  (π/L) cos(π y/L)
     F& d2vf_dy2)  // −(π/L)^2 sin(π y/L)
@@ -917,7 +840,7 @@ F Simulation::wrapX(F x) const {
     return x - std::floor((x - minX) / W) * W;
 }
 
-inline F Simulation::periodicDx(F x1,int ix1, F x2,int ix2) const
+F Simulation::periodicDx(F x1,int ix1, F x2,int ix2) const
 {
     // const F W = maxX - minX;
     // F dx = x1 - x2;
@@ -941,7 +864,7 @@ inline F Simulation::periodicDx(F x1,int ix1, F x2,int ix2) const
 void Simulation::renormalise()
 {
     const F W = maxX - minX;
-
+    const I S = stride();
     for (int i = 0; i < (int)particles2D.size(); ++i) {
         auto &p = particles2D[i];
 
@@ -956,8 +879,8 @@ void Simulation::renormalise()
         int dix = p.ix - old_ix;
         if (dix != 0) {
             F shift = (F)dix * W;
-            globalState_1(DOF*i    ) += shift;
-            globalState_2(DOF*i    ) += shift;
+            globalState_1(S*i    ) += shift;
+            globalState_2(S*i    ) += shift;
         }
     }
 }
@@ -966,21 +889,21 @@ void Simulation::updateEffectiveNeighborCounts() {
     // Loop over each particle.
     for (size_t i = 0; i < particles2D.size(); i++) {
         F rawEffectiveCount = 0;
-
+        const int S = stride();
         // Fetch mod‑position + wrap counter for convenience
-        const F xi   = globalPositions(DOF*i    );  // already ∈ [minX,maxX)
+        const F xi   = globalPositions(S*i    );  // already ∈ [minX,maxX)
         const int ixi = particles2D[i].ix;
 
         // Compute the raw effective count using a soft kernel w(d) = exp(−d²/σ²)
         for (int j : particles2D[i].neighborIndices) {
             // x‑difference with correct periodic image
-            const F xj   = globalPositions(DOF*j    );
+            const F xj   = globalPositions(S*j    );
             const int ixj = particles2D[j].ix;
             F dx = periodicDx(xi, ixi, xj, ixj);
 
             // y is non‑periodic
-            F dy = globalPositions(DOF*i + 1)
-                 - globalPositions(DOF*j + 1);
+            F dy = globalPositions(S*i + 1)
+                 - globalPositions(S*j + 1);
 
             F d2 = dx*dx + dy*dy;  // ignore θ
             rawEffectiveCount += std::exp(-d2 / (kernelSigma * kernelSigma));
@@ -1005,18 +928,19 @@ void Simulation::updateEffectiveNeighborCountsFinal() {
     for (size_t i = 0; i < particles2D.size(); i++) {
         F rawEffectiveCount = 0;
 
+        const int S = stride();
         // Cached mod‐position + wrap counter
-        const F  xi   = globalPositions(DOF*i    );  // ∈ [minX,maxX)
+        const F  xi   = globalPositions(S*i    );  // ∈ [minX,maxX)
         const int ixi = particles2D[i].ix;
 
         // Soft‐kernel sum over neighbours
         for (int j : particles2D[i].neighborIndices) {
-            const F  xj   = globalPositions(DOF*j    );
+            const F  xj   = globalPositions(S*j    );
             const int ixj = particles2D[j].ix;
 
             F dx = periodicDx(xi, ixi, xj, ixj);
-            F dy = globalPositions(DOF*i + 1)
-                 - globalPositions(DOF*j + 1);
+            F dy = globalPositions(S*i + 1)
+                 - globalPositions(S*j + 1);
 
             F d2 = dx*dx + dy*dy;
             rawEffectiveCount += std::exp(-d2 / (kernelSigma * kernelSigma));
@@ -1033,25 +957,6 @@ void Simulation::updateEffectiveNeighborCountsFinal() {
         // Write it back for the next frame
         particles2D[i].prevEffectiveCount = filteredCount;
     }
-}
-
-
-Particle2D::Particle2D(F radius, const Simulation& simParams)
-    : pos(Vector2F::Zero()), vel(Vector2F::Zero()), acc(Vector2F::Zero()), radius(radius)
-{
-    // For a 2D disc, mass = area * density.
-    mass = M_PI * radius * radius * simParams.density;
-    // Moment of inertia for a uniform disc about its center: I = 1/2 * m * r^2.
-    inertia = 0.5 * mass * radius * radius;
-}
-
-Particle3D::Particle3D(F radius, const Simulation& sim)
-    : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
-{
-    // For a sphere, mass = volume * density.
-    mass = (4.0 / 3.0) * M_PI * std::pow(radius, 3) * sim.density;
-    // Moment of inertia for a solid sphere: I = 2/5 * m * r^2.
-    inertia = (2.0 / 5.0) * mass * radius * radius;
 }
 
 std::vector<Particle2D> Simulation::createRandomParticles2D() {
@@ -1122,6 +1027,7 @@ std::vector<Particle2D> Simulation::createRandomParticles2D() {
         }
 
         if (ok) {
+            cand.X0 = cand.pos;
             particles.push_back(std::move(cand));
         } else {
             std::cerr << "createRandomParticles2D: could not place particle "
@@ -1199,6 +1105,45 @@ void Simulation::updateScenarioAnimation(F dt) {
     }
 }
 
+int Simulation::stride() const {          // (= DOF per particle)
+    return boolSoftDEM ? DOF + 1   // x , y , epsV
+                       : DOF;      // x , y
+}
+
+void Simulation::computeCFL() 
+{
+    F advectiveDisplacement = V0 * timeStep;
+
+std::cout 
+    << "Advective CFL check: V0*Δt = " << advectiveDisplacement
+    << "  ;  minimum allowed = " << minParticleDiam
+    << "  →  " 
+    << (advectiveDisplacement < minParticleDiam ? "OK\n" : "TOO LARGE!\n");
+}
+
+/* ================================================================== */
+/*  BUILD MASS MATRIX (diagonal)                                      */
+/* ================================================================== */
+void Simulation::buildMassMatrix(SparseMatrixF& M) const
+{
+    const int S = stride();
+    const int n = int(particles2D.size());
+    std::vector<Trip> T; T.reserve(S*n);
+
+    for (int i = 0; i < n; ++i) {
+        int base = S * i;
+        F m = particles2D[i].mass;
+        T.emplace_back(base    , base    , m);   // x
+        T.emplace_back(base + 1, base + 1, m);   // y
+        if (boolSoftDEM)
+            T.emplace_back(base + 2, base + 2,
+                           0.25 * m * particles2D[i].radius * particles2D[i].radius); // ε
+    }
+    
+    M.resize(S*n,S*n);
+    M.setFromTriplets(T.begin(),T.end());
+}
+
 
 Square::Square(F halfLength, F halfWidth, const Vector3F& pos)
     : halfLength(halfLength), halfWidth(halfWidth)
@@ -1230,8 +1175,8 @@ void Square::generateVertices() {
 
 int Square::detectCollision(const Particle2D &p) const {
     // Use the cached bounding box (BB) for collision detection.
-    if ((p.pos(0) - p.radius) < BB.min_x || (p.pos(0) + p.radius) > BB.max_x ||
-        (p.pos(1) - p.radius) < BB.min_y || (p.pos(1) + p.radius) > BB.max_y)
+    if ((p.pos(0) - p.effectiveRadius()) < BB.min_x || (p.pos(0) + p.effectiveRadius()) > BB.max_x ||
+        (p.pos(1) - p.effectiveRadius()) < BB.min_y || (p.pos(1) + p.effectiveRadius()) > BB.max_y)
     {
         return 2; // Collision with square boundary.
     }
@@ -1269,7 +1214,7 @@ int Circle::detectCollision(const Particle2D &p) const {
     F dx = p.pos(0) - position(0);
     F dy = p.pos(1) - position(1);
     F distSq = dx * dx + dy * dy;
-    F limit = radius - p.radius;
+    F limit = radius - p.effectiveRadius();
     if (distSq > (limit * limit))
         return 1; // Collision with circle boundary.
     return 0;
@@ -1306,36 +1251,35 @@ void Tunnel2D::generateVertices()
 int Tunnel2D::detectCollision(const Particle2D& p) const
 {
     /* only top / bottom walls act as barriers */
-    if (p.pos(1) - p.radius < BB.min_y || p.pos(1) + p.radius > BB.max_y)
+    if (p.pos(1) - p.effectiveRadius() < BB.min_y || p.pos(1) + p.effectiveRadius() > BB.max_y)
         return 3;                 // same collision code used by Square
     return 0;
 }
 
-void Simulation::computeCFL() 
+Particle2D::Particle2D(F radius, const Simulation& sim)
+    : pos(Vector2F::Zero()), vel(Vector2F::Zero()), acc(Vector2F::Zero()), radius(radius)
 {
-    F advectiveDisplacement = V0 * timeStep;
+    // For a 2D disc, mass = area * density.
+    mass = M_PI * radius * radius * sim.density;
+    // Moment of inertia for a uniform disc about its center: I = 1/2 * m * r^2.
+    inertia = 0.5 * mass * radius * radius;
 
-std::cout 
-    << "Advective CFL check: V0*Δt = " << advectiveDisplacement
-    << "  ;  minimum allowed = " << minParticleDiam
-    << "  →  " 
-    << (advectiveDisplacement < minParticleDiam ? "OK\n" : "TOO LARGE!\n");
+    X0      = pos;                     // take spawn position as “rest”
+    F_prev.setIdentity();
+    D.setZero();
 }
 
-/* ================================================================== */
-/*  BUILD MASS MATRIX (diagonal)                                      */
-/* ================================================================== */
-void Simulation::buildMassMatrix(SparseMatrixF& M) const
-{
-    const int n = int(particles2D.size());
-    std::vector<Trip> T; T.reserve(2*n);
 
-    for (int i=0;i<n;++i)
-    {
-        const F m = particles2D[i].mass;
-        T.emplace_back(DOF*i    ,DOF*i    ,m);
-        T.emplace_back(DOF*i + 1,DOF*i + 1,m);
-    }
-    M.resize(DOF*n,DOF*n);
-    M.setFromTriplets(T.begin(),T.end());
+Particle3D::Particle3D(F radius, const Simulation& sim)
+    : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
+{
+    // For a sphere, mass = volume * density.
+    mass = (4.0 / 3.0) * M_PI * std::pow(radius, 3) * sim.density;
+    // Moment of inertia for a solid sphere: I = 2/5 * m * r^2.
+    inertia = (2.0 / 5.0) * mass * radius * radius;
+}
+
+F Particle2D::effectiveRadius() const
+{
+    return radius * (1.0f + epsV);
 }

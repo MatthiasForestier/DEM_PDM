@@ -81,18 +81,21 @@ void exportSimulationForML(const SplashScreenResult &params) {
     // Header format: run,time,energy,p0_x,p0_y,p0_radius,p1_x,p1_y,p1_radius, ... for all particles.
     outfile << "run,time,energy,bool_dynamic,bool_viscosity," 
         << "gravity_y,overlapParam,interactionParam,viscosity_coeff,sigma,alpha,"
-        << "scenarioObj_x,scenarioObj_y,scenarioObj_theta,scenarioShapeIndex,"
+        << "scenarioObj_x,scenarioObj_y,scenarioObj_z,scenarioShapeIndex,"
         << "scenarioObj_min_x, scenarioObj_max_x, scenarioObj_min_y, scenarioObj_max_y";
     for (int i = 0; i < app.sim.numParticles; i++) {
-        outfile << ",p" << i << "_x,p" << i << "_y,p" << i << "_theta,p" << i << "_radius";
+        outfile << ",p" << i << "_x,p" << i << "_y,p" << i << "_radius,p" << i << "_mass";
     }
     outfile << "\n";
-    
+
     // Outer loop: run the simulation multiple times.
     for (int run = 0; run < params.numSimulations; run++) {
         // Reinitialize simulation state:
         app.sim.buildGridDataStructure();
         app.sim.particles2D = app.sim.createRandomParticles2D();
+        for (auto &p : app.sim.particles2D) p.ix = 0;
+        app.reinitializeGlobalState();
+        app.sim.buildMassMatrix(app.sim.M);
         app.sim.insertParticlesIntoGrid();
         app.reinitializeGlobalState();
         
@@ -118,7 +121,7 @@ void exportSimulationForML(const SplashScreenResult &params) {
             
             F energy;
             app.sim.compute_energy(energy);
-            
+
             // Write the current state to the CSV.
             // We assume app.sim.particles2D is a container of particles, each having a position (as a 2D vector) and a radius.
             outfile << run << "," << t << "," << energy << ","
@@ -146,8 +149,8 @@ void exportSimulationForML(const SplashScreenResult &params) {
                 // Access the particle's x and y from its position vector, and its radius.
                 outfile << "," << particle.pos[0]
                         << "," << particle.pos[1]
-                        << "," << particle.pos[2]
-                        << "," << particle.radius;
+                        << "," << particle.radius
+                        << "," << particle.mass;
             }
             outfile << "\n";
             

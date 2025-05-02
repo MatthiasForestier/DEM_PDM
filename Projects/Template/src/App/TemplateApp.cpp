@@ -9,6 +9,9 @@
 #include <iostream>
 #include <random>
 
+/* uniform wrapper for ImGui scalar inputs -------------------------------- */
+void scalarInput(const char* label, F& var, F step, const char* fmt = "%.3f")
+{ ImGui::InputDouble(label, &var, step, step*5, fmt); }
 
 TemplateApp::TemplateApp(const SplashScreenResult &initParam) {
     // Initialize your simulation parameters using initParam.
@@ -16,8 +19,7 @@ TemplateApp::TemplateApp(const SplashScreenResult &initParam) {
     sim.use3D = initParam.use3D;
     // sim.timeStep = initParam.timeStep;
     sim.dynamic = initParam.dynamic;
-    sim.friction = initParam.viscosity;
-    // ... initialize any other simulation parameters ...
+    sim.viscosity = initParam.viscosity;
 }
 
 void TemplateApp::initializeSubApp() {
@@ -216,8 +218,12 @@ void TemplateApp::makeRunCheckWindow() {
         ImGui::InputInt("## Convergence exponent:", &exponent_convergence_threshold);
         dynamic_convergence_threshold = pow(10.0, exponent_convergence_threshold);
         ImGui::InputInt("max Iteration for Time Stepping", &maxIter, 10.0, 100.0);
-        ImGui::Checkbox("Viscosity", &sim.viscosity);
-        ImGui::Checkbox("Friction", &sim.friction);
+        ImGui::Checkbox("Neighbour-Dep. Viscosity", &sim.viscosity);
+        ImGui::Checkbox("Deformation-Dep. Viscosity", &sim.deformation_viscosity);
+        if (sim.deformation_viscosity) {
+            scalarInput("η  (Pa·s)"          , sim.eta_def ,  0.5);
+            scalarInput("Kernel h / R_max"   , sim.F_kernel,  0.1, "%.2f");
+        }
     }
 
     // --- New button to print breach and calls to the terminal ---
@@ -493,7 +499,7 @@ void TemplateApp::getViewerData(std::vector<CRLViewerData>& viewer_data, CRLCame
         const Particle2D& p = sim.particles2D[i];
         Vector3F center(p.pos(0), p.pos(1), 0.0f);
         center(0) = sim.wrapX(center(0));   // visual copy only
-        F radius = p.radius;
+        F radius = p.radius * (1.0 + p.epsV);   // instead of plain p.radius;
 
         // Write the center vertex.
         particleViewerData.mesh_v.row(vertexOffset) = center.transpose();
@@ -522,17 +528,43 @@ void TemplateApp::getViewerData(std::vector<CRLViewerData>& viewer_data, CRLCame
         faceOffset++;
     }
 
-    // Optionally color the particle disks using each particle's own color.
-    particleViewerData.mesh_c = MatrixXF::Constant(totalParticleFaces, 3, 1.0);
-    int currentFace = 0;
-    for (int i = 0; i < numParticles; i++) {
-        const Particle2D& p = sim.particles2D[i];
-        for (int j = 0; j < numSegments; j++) {
-            particleViewerData.mesh_c.row(currentFace) << p.color.r, p.color.g, p.color.b;
-            currentFace++;
-        }
-    }
+    // ---------------------------------------------
+    // 1. Resize colour matrix once
+    // ---------------------------------------------
+    particleViewerData.mesh_c.resize(totalParticleFaces, 3);
 
+    // ---------------------------------------------
+    // 2. Loop over particles, assign one block each
+    // ---------------------------------------------
+    int rowOffset = 0;
+    for (const auto &p : sim.particles2D)
+    {
+        // --- pick a 3‐vector colour of type double ---
+        Eigen::RowVector3d col;                 // <-- double now
+
+        if (sim.boolSoftDEM)
+        {
+            // blue↔red ramp based on epsV
+            constexpr double eps0  = 7e-3;        // 70 µε → mid-point
+            constexpr double sharp =  2.0;        // larger ⇒ steeper around eps0
+            const double s = static_cast<double>(p.epsV);
+            double t = 1.0 / (1.0 + std::exp(-sharp * (s/eps0)));   // (0,1)
+
+            /* map   t∈(0,1)  →  blue↔red  */
+            col << t, 0.0, 1.0 - t;
+        }else{
+            col << static_cast<double>(p.color.r),
+                static_cast<double>(p.color.g),
+                static_cast<double>(p.color.b);
+        }
+
+        // --- fill the next `numSegments` rows with that colour ---
+        particleViewerData.mesh_c
+            .block(rowOffset, 0, numSegments, 3)
+            .rowwise() = col;
+
+        rowOffset += numSegments;
+    }
     /////////////
     // SCENARIO OBJECTS
     /////////////
