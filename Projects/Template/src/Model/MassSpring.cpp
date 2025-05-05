@@ -356,6 +356,7 @@ void Simulation::applyGlobalPositions(const VectorXF &P)
 
             if (periodicX)
                 p.pos(0) = wrapX(p.pos(0));
+                //globalPositions[S*i] = p.pos(0);
 
             /* ε_V if present */
             if (boolSoftDEM)

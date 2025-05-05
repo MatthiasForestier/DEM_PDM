@@ -106,6 +106,8 @@ namespace EnergyFunctions {
         F t10 = p.radius * (0.1e1 + epsV1);
         F t12 = q.radius * (0.1e1 + epsV2);
         F t13 = -t8 + t10 + t12;
+        if (t13 <= 1e-6)                      // full overlap or ε < –1
+            return 0;
         F t14 = t13 * t13;
         F t17 = sqrt(0.2e1);
         F t21 = sqrt(t13 * (t10 + t12));
@@ -252,113 +254,121 @@ namespace GradientFunctions {
     const Particle2D& q,
     const Simulation& sim)
         {
-            // 1) relative coords
-            F dx = sim.periodicDx(p.pos(0),p.ix, q.pos(0),q.ix);
-            F dy = p.pos(1) - q.pos(1);
+        // 1) relative coords
+        F dx = sim.periodicDx(p.pos(0),p.ix, q.pos(0),q.ix);
+        F dy = p.pos(1) - q.pos(1);
 
-            // 2) pack exactly for Maple
-            F inputs[6] = {
-            dx,
-            dy,
-            p.epsV,
-            F(0),
-            F(0),
-            q.epsV
-            };
+        // 2) pack exactly for Maple
+        F inputs[6] = {
+        dx,
+        dy,
+        p.epsV,
+        F(0),
+        F(0),
+        q.epsV
+        };
 
-            // 3) call Maple‐dumped gradient (6×1)
-            F gradU[6];
-            {
-            // clang-format off
-            F x1    = inputs[0];
-            F y1    = inputs[1];
-            F epsV1 = inputs[2];
-            F x2    = inputs[3];
-            F y2    = inputs[4];
-            F epsV2 = inputs[5];
+        // 3) call Maple‐dumped gradient (6×1)
+        F gradU[6];
+        {
+        // clang-format off
+        F x1    = inputs[0];
+        F y1    = inputs[1];
+        F epsV1 = inputs[2];
+        F x2    = inputs[3];
+        F y2    = inputs[4];
+        F epsV2 = inputs[5];
 
-            F t1 = x1 * x1;
-            F t4 = x2 * x2;
-            F t5 = y1 - y2;
-            F t6 = t5 * t5;
-            F t8 = sqrt(-0.2e1 * x1 * x2 + t1 + t4 + t6);
-            F t10 = p.radius * (0.1e1 + epsV1);
-            F t12 = q.radius * (0.1e1 + epsV2);
-            F t13 = -t8 + t10 + t12;
-            F t14 = t13 * t13;
-            F t15 = sim.Young * t14;
-            F t16 = sqrt(0.2e1);
-            F t17 = t16 * sim.a;
-            F t18 = t10 + t12;
-            F t20 = sqrt(t13 * t18);
-            F t23 = sim.b * t13 + t20 * t17;
-            F t24 = 0.1e1 / t23 / 0.3e1;
-            F t25 = 0.1e1 / t8;
-            F t26 = t25 * t24;
-            F t27 = x1 - x2;
-            F t32 = sim.Young * t14 * t13;
-            F t34 = pow(t23, -0.2e1) / 0.9e1;
-            F t35 = 0.1e1 / t20;
-            F t36 = t35 * t17;
-            F t37 = t25 * t18;
+        F t1 = x1 * x1;
+        F t4 = x2 * x2;
+        F t5 = y1 - y2;
+        F t6 = t5 * t5;
+        F t8 = sqrt(-0.2e1 * x1 * x2 + t1 + t4 + t6);
+        if (t8 < 1e-14)                     // same particle / identical pos
+            return {0,0,0,0};
+        F t10 = p.radius * (0.1e1 + epsV1);
+        F t12 = q.radius * (0.1e1 + epsV2);
+        F t13 = -t8 + t10 + t12;
+        if (t13 <= 0)                     // already separated – no Soft‑DEM
+            return {0,0,0,0};
+        F t14 = t13 * t13;
+        if (t14 <= 1e-12)
+            return {0,0,0,0};
+        F t15 = sim.Young * t14;
+        F t16 = sqrt(0.2e1);
+        F t17 = t16 * sim.a;
+        F t18 = t10 + t12;
+        F t20 = sqrt(t13 * t18);
+        F t23 = sim.b * t13 + t20 * t17;
+        if (std::abs(t23) < 1e-10)        // ill‑conditioned
+            return {0,0,0,0};
+        F t24 = 0.1e1 / t23 / 0.3e1;
+        F t25 = 0.1e1 / t8;
+        F t26 = t25 * t24;
+        F t27 = x1 - x2;
+        F t32 = sim.Young * t14 * t13;
+        F t34 = pow(t23, -0.2e1) / 0.9e1;
+        F t35 = 0.1e1 / t20;
+        F t36 = t35 * t17;
+        F t37 = t25 * t18;
 
-            F unknown[6];
+        F unknown[6];
 
-            unknown[0] = -0.3e1 * t27 * t26 * t15
-                        - (
-                            -0.3e1 / 0.2e1 * t27 * t37 * t36
-                            - 0.3e1 * sim.b * t27 * t25
-                        ) * t34 * t32;
-            unknown[1] = -0.3e1 * t5  * t26 * t15
-                        - (
-                            -0.3e1 / 0.2e1 * t5  * t37 * t36
-                            - 0.3e1 * sim.b * t5  * t25
-                        ) * t34 * t32;
-            unknown[2] =  0.3e1 * p.radius * t24 * t15
-                        - (
-                            0.3e1 / 0.2e1 * (t13 * p.radius + p.radius * t18) * t35 * t17
-                            + 0.3e1 * p.radius * sim.b
-                        ) * t34 * t32;
-            unknown[3] =  0.3e1 * t27 * t26 * t15
-                        - (
-                            0.3e1 / 0.2e1 * t27 * t37 * t36
-                            + 0.3e1 * sim.b * t27 * t25
-                        ) * t34 * t32;
-            unknown[4] =  0.3e1 * t5  * t26 * t15
-                        - (
-                            0.3e1 / 0.2e1 * t5  * t37 * t36
-                            + 0.3e1 * sim.b * t5  * t25
-                        ) * t34 * t32;
-            unknown[5] =  0.3e1 * q.radius * t24 * t15
-                        - (
-                            0.3e1 / 0.2e1 * (t13 * q.radius + q.radius * t18) * t35 * t17
-                            + 0.3e1 * q.radius * sim.b
-                        ) * t34 * t32;
+        unknown[0] = -0.3e1 * t27 * t26 * t15
+                    - (
+                        -0.3e1 / 0.2e1 * t27 * t37 * t36
+                        - 0.3e1 * sim.b * t27 * t25
+                    ) * t34 * t32;
+        unknown[1] = -0.3e1 * t5  * t26 * t15
+                    - (
+                        -0.3e1 / 0.2e1 * t5  * t37 * t36
+                        - 0.3e1 * sim.b * t5  * t25
+                    ) * t34 * t32;
+        unknown[2] =  0.3e1 * p.radius * t24 * t15
+                    - (
+                        0.3e1 / 0.2e1 * (t13 * p.radius + p.radius * t18) * t35 * t17
+                        + 0.3e1 * p.radius * sim.b
+                    ) * t34 * t32;
+        unknown[3] =  0.3e1 * t27 * t26 * t15
+                    - (
+                        0.3e1 / 0.2e1 * t27 * t37 * t36
+                        + 0.3e1 * sim.b * t27 * t25
+                    ) * t34 * t32;
+        unknown[4] =  0.3e1 * t5  * t26 * t15
+                    - (
+                        0.3e1 / 0.2e1 * t5  * t37 * t36
+                        + 0.3e1 * sim.b * t5  * t25
+                    ) * t34 * t32;
+        unknown[5] =  0.3e1 * q.radius * t24 * t15
+                    - (
+                        0.3e1 / 0.2e1 * (t13 * q.radius + q.radius * t18) * t35 * t17
+                        + 0.3e1 * q.radius * sim.b
+                    ) * t34 * t32;
 
 
-            VectorXF gradU(6);
-            processMapleOutput(reinterpret_cast<F*>(unknown),
-                            /*→ vector overload needs MatrixXF →*/ gradU,
-                            /*rows*/6, /*cols*/1);
+        VectorXF gradU(6);
+        processMapleOutput(reinterpret_cast<F*>(unknown),
+                        /*→ vector overload needs MatrixXF →*/ gradU,
+                        /*rows*/6, /*cols*/1);
 
-            // now extract
-            F dUx = gradU(0);
-            F dUy = gradU(1);
-            F dUde1 = gradU(2);
-            F dUde2 = gradU(5);
+        // now extract
+        F dUx = gradU(0);
+        F dUy = gradU(1);
+        F dUde1 = gradU(2);
+        F dUde2 = gradU(5);
 
-            // **do not** negate these here
-            return { dUx, dUy, dUde1, dUde2 };
-        }
+        // **do not** negate these here
+        return { dUx, dUy, dUde1, dUde2 };
+    }
 
-        // 4) gradU now holds [∂U/∂x1, ∂U/∂y1, ∂U/∂ε1, ∂U/∂x2, ∂U/∂y2, ∂U/∂ε2]
-        //    We want forces = -dU/dx, and volumetric couplings = +dU/dε
-        F fx    = -gradU[0];
-        F fy    = -gradU[1];
-        F deps1 =  gradU[2];
-        F deps2 =  gradU[5];
+    // 4) gradU now holds [∂U/∂x1, ∂U/∂y1, ∂U/∂ε1, ∂U/∂x2, ∂U/∂y2, ∂U/∂ε2]
+    //    We want forces = -dU/dx, and volumetric couplings = +dU/dε
+    F fx    = -gradU[0];
+    F fy    = -gradU[1];
+    F deps1 =  gradU[2];
+    F deps2 =  gradU[5];
 
-        return {fx, fy, deps1, deps2};
+    return {fx, fy, deps1, deps2};
     }
 
     F pinSpringGradient(const Simulation& sim) {
@@ -497,7 +507,7 @@ namespace HessianFunctions {
         }
         // 3) Tunnel wall
         else if (p.BoundaryCollision == 3) {
-            F py = p.pos(1), r = p.effectiveRadius();
+            F py = p.pos(1), r = p.radius;
             for (auto& so : sim.scenarioObjects) if (auto* tu = dynamic_cast<Tunnel2D*>(so.get())) {
             F δ=0; int sy=0;
             if      (py - r < tu->BB.min_y) { δ = tu->BB.min_y - (py - p.effectiveRadius()); sy = -1; }
@@ -618,9 +628,13 @@ namespace HessianFunctions {
         F t6 = t5 * t5;
         F t7 = -0.2e1 * x1 * x2 + t1 + t4 + t6;
         F t8 = sqrt(t7);
+        if (t8 < 1e-14)                     // same particle / identical pos
+            return;
         F t10 = p.radius * (0.1e1 + epsV1);
         F t12 = q.radius * (0.1e1 + epsV2);
         F t13 = -t8 + t10 + t12;
+        if (t13 <= 0)                     // already separated – no Soft‑DEM
+            return;
         F t14 = sim.Young * t13;
         F t15 = sqrt(0.2e1);
         F t16 = t15 * sim.a;
@@ -628,6 +642,8 @@ namespace HessianFunctions {
         F t18 = t13 * t17;
         F t19 = sqrt(t18);
         F t22 = sim.b * t13 + t19 * t16;
+        if (std::abs(t22) < 1e-10)        // ill‑conditioned
+            return;
         F t23 = 0.1e1 / t22 / 0.3e1;
         F t24 = 0.1e1 / t7;
         F t25 = t24 * t23;
@@ -808,8 +824,10 @@ namespace EnergyDynFunctions {
         // F x2 = inputs[3];
         // F y2 = inputs[4];
 
-        // F t2 = r0 * r0;
-        // F t5 = pow(0.1e1 + epsV1, 0.2e1);
+        // clang-format off
+
+        // F t2 = pow(0.1e1 + epsV1, 0.2e1);
+        // F t4 = r0 * r0;
         // F t6 = Fprev11 * Fprev11;
         // F t8 = Fprev12 * Fprev12;
         // F t9 = Fprev12 * Fprev21;
@@ -847,19 +865,19 @@ namespace EnergyDynFunctions {
         // F t64 = t20 * t20;
         // F t67 = t30 * X2;
         // F t70 = t21 + t22 - t25;
-        // F t91 = -Y2 + Y1;
-        // F t92 = t91 * (Y1 * t35 + Y2 * t70 + t20 * t23);
+        // F t87 = Y1 - Y2;
+        // F t92 = (Y1 * t35 + Y2 * t70 + t20 * t23) * t87;
         // F t96 = t30 * t30;
         // F t106 = t6 + t8 / 0.2e1 + t9 + t11 / 0.2e1 + t12;
-        // F t114 = t91 * t91;
-        // F t119 = dt * dt;
-        // F t124 = pow(-0.2e1 * X2 * X1 + t114 + t15 + t30, 0.2e1);
+        // F t114 = t87 * t87;
+        // F t122 = pow(-0.2e1 * X2 * X1 + t114 + t15 + t30, 0.2e1);
+        // F t124 = dt * dt;
 
         // F unknown[1];
 
-        // unknown[0] = 0.1e1 / t124 / t119 * (t16 * t14 + 0.2e1 * t15 * X1 * (-0.2e1 * X2 * t14 + t21 + t22 - t25) + t15 * (0.6e1 * X2 * t35 + 0.6e1 * t30 * t14 + t40 + t49 + t52 + t57 + t59 - t61 + t63 + t64) + 0.2e1 * X1 * (-0.2e1 * t67 * t14 + 0.3e1 * t30 * t70 + X2 * (-0.2e1 * t38 * t14 + 0.2e1 * Y1 * (0.2e1 * Y2 * t14 + t46 + t53 + t54) - 0.2e1 * t50 * t14 + 0.2e1 * Y2 * (t43 + t44 - t46) - t59 + t61 - t63 - t64) - t92) + t96 * t14 + 0.2e1 * t67 * t35 + t30 * (t40 + t49 + t52 + t57 + t59 - t61 + t63 + t64) + 0.2e1 * X2 * t92 + 0.2e1 * t114 * (t38 * t106 + Y1 * (t41 + t43 + t44 - t46) + t50 * t106 + t56 + t58 / 0.2e1 - t60 + t62 / 0.2e1 + t64)) * t5 * t2 * eta * 0.3141592654e1 / 0.4e1;
+        // unknown[0] = 0.1e1 / t124 / t122 * 0.3141592654e1 * (t16 * t14 + 0.2e1 * t15 * X1 * (-0.2e1 * X2 * t14 + t21 + t22 - t25) + t15 * (0.6e1 * X2 * t35 + 0.6e1 * t14 * t30 + t40 + t49 + t52 + t57 + t59 - t61 + t63 + t64) + 0.2e1 * X1 * (-0.2e1 * t67 * t14 + 0.3e1 * t30 * t70 + X2 * (-0.2e1 * t38 * t14 + 0.2e1 * Y1 * (0.2e1 * Y2 * t14 + t46 + t53 + t54) - 0.2e1 * t50 * t14 + 0.2e1 * Y2 * (t43 + t44 - t46) - t59 + t61 - t63 - t64) - t92) + t96 * t14 + 0.2e1 * t67 * t35 + t30 * (t40 + t49 + t52 + t57 + t59 - t61 + t63 + t64) + 0.2e1 * X2 * t92 + 0.2e1 * t114 * (t38 * t106 + Y1 * (t41 + t43 + t44 - t46) + t50 * t106 + t56 + t58 / 0.2e1 - t60 + t62 / 0.2e1 + t64)) * t4 * eta * t2 / 0.4e1;
 
-    
+        
         return 0; // unknown[0];
     }
 }
@@ -876,14 +894,12 @@ namespace GradientDynFunctions {
         // F x2 = inputs[3];
         // F y2 = inputs[4];
 
-        // F t2 = r0 * r0;
-        // F t3 = t2 * eta * 0.3141592654e1;
-        // F t4 = 0.1e1 + epsV1;
-        // F t5 = t4 * t4;
+        // F t1 = 0.1e1 + epsV1;
+        // F t2 = t1 * t1;
+        // F t4 = r0 * r0;
+        // F t5 = t4 * eta * t2;
         // F t6 = X1 * X1;
         // F t7 = t6 * X1;
-        // F t9 = 0.4e1 * t7 * Fprev11;
-        // F t11 = 0.12e2 * Fprev11 * X2;
         // F t12 = -Fprev12 - Fprev21;
         // F t13 = Y1 * t12;
         // F t14 = 0.2e1 * t13;
@@ -892,23 +908,15 @@ namespace GradientDynFunctions {
         // F t17 = 0.4e1 * x1;
         // F t18 = 0.4e1 * x2;
         // F t21 = X2 * X2;
-        // F t23 = 0.6e1 * t21 * Fprev11;
         // F t24 = -Y1 * t12;
-        // F t25 = 0.2e1 * t24;
         // F t26 = Y2 * t12;
-        // F t27 = 0.2e1 * t26;
-        // F t28 = t25 + t27 - t17 + t18;
-        // F t34 = 0.2e1 * Fprev11 * Y1 - 0.2e1 * Fprev11 * Y2 - y1 + y2;
-        // F t35 = -Y2 + Y1;
-        // F t36 = t35 * t34;
+        // F t30 = Y1 - Y2;
+        // F t36 = (0.2e1 * Fprev11 * Y1 - 0.2e1 * Fprev11 * Y2 - y1 + y2) * t30;
         // F t40 = t21 * X2;
-        // F t42 = 0.4e1 * t40 * Fprev11;
-        // F t43 = t14 + t16 + t17 - t18;
-        // F t47 = t13 + t15 + x1 - x2;
-        // F t48 = t35 * t35;
-        // F t53 = dt * dt;
-        // F t58 = pow(-0.2e1 * X2 * X1 + t21 + t48 + t6, 0.2e1);
-        // F t60 = 0.1e1 / t58 / t53;
+        // F t48 = t30 * t30;
+        // F t56 = pow(-0.2e1 * X2 * X1 + t21 + t48 + t6, 0.2e1);
+        // F t58 = dt * dt;
+        // F t60 = 0.1e1 / t58 / t56;
         // F t68 = Fprev22 * Y1;
         // F t69 = 0.4e1 * t68;
         // F t70 = Fprev22 * Y2;
@@ -916,54 +924,50 @@ namespace GradientDynFunctions {
         // F t72 = 0.2e1 * y2;
         // F t73 = 0.2e1 * y1;
         // F t78 = t69 - t71 - t73 + t72;
-        // F t80 = t24 + t26 + x2 - x1;
-        // F t81 = t35 * t80;
-        // F t90 = -t68 + t70 + y1 - y2;
-        // F t98 = Fprev11 * Fprev11;
-        // F t100 = Fprev12 * Fprev12;
-        // F t101 = Fprev12 * Fprev21;
-        // F t103 = Fprev21 * Fprev21;
-        // F t104 = Fprev22 * Fprev22;
-        // F t106 = 0.2e1 * t98 + t100 + 0.2e1 * t101 + t103 + 0.2e1 * t104;
-        // F t107 = t6 * t6;
-        // F t111 = y2 - y1;
-        // F t112 = Fprev12 * t111;
-        // F t113 = Fprev21 * t111;
-        // F t114 = -x2 + x1;
-        // F t116 = 0.2e1 * t114 * Fprev11;
-        // F t124 = -Fprev12 * t111 - Fprev21 * t111 + t116;
-        // F t127 = Y1 * Y1;
-        // F t129 = 0.2e1 * t127 * t106;
-        // F t130 = -Y2 * t106;
-        // F t132 = -Fprev12 * t114;
-        // F t133 = -Fprev21 * t114;
-        // F t135 = -0.2e1 * t111 * Fprev22;
-        // F t138 = 0.2e1 * Y1 * (0.2e1 * t130 + t132 + t133 - t135);
-        // F t139 = Y2 * Y2;
-        // F t141 = 0.2e1 * t139 * t106;
-        // F t142 = Fprev12 * t114;
-        // F t143 = Fprev21 * t114;
-        // F t145 = Y2 * (t142 + t143 + t135);
-        // F t146 = 0.2e1 * t145;
-        // F t147 = x1 * x1;
+        // F t81 = (t24 + t26 + x2 - x1) * t30;
+        // F t100 = Fprev11 * Fprev11;
+        // F t102 = Fprev12 * Fprev12;
+        // F t103 = Fprev12 * Fprev21;
+        // F t105 = Fprev21 * Fprev21;
+        // F t106 = Fprev22 * Fprev22;
+        // F t108 = 0.2e1 * t100 + t102 + 0.2e1 * t103 + t105 + 0.2e1 * t106;
+        // F t109 = t6 * t6;
+        // F t113 = y2 - y1;
+        // F t114 = Fprev12 * t113;
+        // F t115 = Fprev21 * t113;
+        // F t116 = -x2 + x1;
+        // F t118 = 0.2e1 * t116 * Fprev11;
+        // F t126 = -Fprev12 * t113 - Fprev21 * t113 + t118;
+        // F t129 = Y1 * Y1;
+        // F t131 = 0.2e1 * t129 * t108;
+        // F t132 = -Y2 * t108;
+        // F t134 = -Fprev12 * t116;
+        // F t135 = -Fprev21 * t116;
+        // F t137 = -0.2e1 * t113 * Fprev22;
+        // F t140 = 0.2e1 * Y1 * (0.2e1 * t132 + t134 + t135 - t137);
+        // F t141 = Y2 * Y2;
+        // F t143 = 0.2e1 * t141 * t108;
+        // F t144 = Fprev12 * t116;
+        // F t145 = Fprev21 * t116;
+        // F t147 = Y2 * (t144 + t145 + t137);
         // F t148 = 0.2e1 * t147;
-        // F t149 = x1 * x2;
-        // F t150 = 0.4e1 * t149;
-        // F t151 = x2 * x2;
-        // F t152 = 0.2e1 * t151;
-        // F t153 = t111 * t111;
-        // F t158 = t112 + t113 - t116;
-        // F t179 = t35 * (Y1 * t124 + Y2 * t158 + t111 * t114);
-        // F t183 = t21 * t21;
-        // F t193 = t98 + t100 / 0.2e1 + t101 + t103 / 0.2e1 + t104;
-        // F t211 = -t35 * t34;
-        // F t234 = t35 * t47;
+        // F t149 = x1 * x1;
+        // F t150 = 0.2e1 * t149;
+        // F t151 = x1 * x2;
+        // F t152 = 0.4e1 * t151;
+        // F t153 = x2 * x2;
+        // F t154 = 0.2e1 * t153;
+        // F t155 = t113 * t113;
+        // F t160 = t114 + t115 - t118;
+        // F t181 = (Y1 * t126 + Y2 * t160 + t113 * t116) * t30;
+        // F t185 = t21 * t21;
+        // F t195 = t100 + t102 / 0.2e1 + t103 + t105 / 0.2e1 + t106;
 
-        // F unknown[5];
+        // F unknown[3];
 
-        // unknown[0] = t60 * (-t9 + t6 * (t11 + t14 + t16 + t17 - t18) + 0.2e1 * X1 * (X2 * t28 - t23 - t36) + t42 + t21 * t43 + 0.2e1 * X2 * t36 + 0.2e1 * t48 * t47) * t5 * t3 / 0.4e1;
-        // unknown[1] = t60 * (0.2e1 * t7 * t12 + t6 * (-0.6e1 * X2 * t12 - t69 + t71 - t72 + t73) + 0.2e1 * X1 * (X2 * t78 + 0.3e1 * t12 * t21 - t81) - 0.2e1 * t40 * t12 - t21 * t78 + 0.2e1 * X2 * t81 + 0.4e1 * t48 * t90) * t5 * t3 / 0.4e1;
-        // unknown[2] = t60 * (t107 * t106 + 0.2e1 * t7 * (-0.2e1 * X2 * t106 + t112 + t113 - t116) + t6 * (0.6e1 * X2 * t124 + 0.6e1 * t106 * t21 + t129 + t138 + t141 + t146 + t148 - t150 + t152 + t153) + 0.2e1 * X1 * (-0.2e1 * t40 * t106 + 0.3e1 * t21 * t158 + X2 * (-0.2e1 * t127 * t106 + 0.2e1 * Y1 * (0.2e1 * Y2 * t106 + t135 + t142 + t143) - 0.2e1 * t139 * t106 + 0.2e1 * Y2 * (t132 + t133 - t135) - t148 + t150 - t152 - t153) - t179) + t183 * t106 + 0.2e1 * t40 * t124 + t21 * (t129 + t138 + t141 + t146 + t148 - t150 + t152 + t153) + 0.2e1 * X2 * t179 + 0.2e1 * t48 * (t127 * t193 + Y1 * (t130 + t132 + t133 - t135) + t139 * t193 + t145 + t147 / 0.2e1 - t149 + t151 / 0.2e1 + t153)) * t4 * t3 / 0.2e1;
+        // unknown[0] = t60 * 0.3141592654e1 * (-0.4e1 * t7 * Fprev11 + t6 * (0.12e2 * Fprev11 * X2 + t14 + t16 + t17 - t18) + 0.2e1 * X1 * (-0.6e1 * t21 * Fprev11 + X2 * (0.2e1 * t24 + 0.2e1 * t26 - t17 + t18) - t36) + 0.4e1 * t40 * Fprev11 + t21 * (t14 + t16 + t17 - t18) + 0.2e1 * X2 * t36 + 0.2e1 * t48 * (t13 + t15 + x1 - x2)) * t5 / 0.4e1;
+        // unknown[1] = t60 * 0.3141592654e1 * (0.2e1 * t7 * t12 + t6 * (-0.6e1 * X2 * t12 - t69 + t71 - t72 + t73) + 0.2e1 * X1 * (X2 * t78 + 0.3e1 * t21 * t12 - t81) - 0.2e1 * t40 * t12 - t21 * t78 + 0.2e1 * X2 * t81 + 0.4e1 * t48 * (-t68 + t70 + y1 - y2)) * t5 / 0.4e1;
+        // unknown[2] = t60 * 0.3141592654e1 * (t109 * t108 + 0.2e1 * t7 * (-0.2e1 * X2 * t108 + t114 + t115 - t118) + t6 * (0.6e1 * X2 * t126 + 0.6e1 * t21 * t108 + t131 + t140 + t143 + t148 + t150 - t152 + t154 + t155) + 0.2e1 * X1 * (-0.2e1 * t40 * t108 + 0.3e1 * t21 * t160 + X2 * (-0.2e1 * t129 * t108 + 0.2e1 * Y1 * (0.2e1 * Y2 * t108 + t137 + t144 + t145) - 0.2e1 * t141 * t108 + 0.2e1 * Y2 * (t134 + t135 - t137) - t150 + t152 - t154 - t155) - t181) + t185 * t108 + 0.2e1 * t40 * t126 + t21 * (t131 + t140 + t143 + t148 + t150 - t152 + t154 + t155) + 0.2e1 * X2 * t181 + 0.2e1 * t48 * (t129 * t195 + Y1 * (t132 + t134 + t135 - t137) + t141 * t195 + t147 + t149 / 0.2e1 - t151 + t153 / 0.2e1 + t155)) * t4 * eta * t1 / 0.2e1;
 
         // fx =  unknown[0];
         // fy =  unknown[1];
@@ -988,134 +992,96 @@ namespace HessianDynFunctions {
         // F x2 = inputs[3];
         // F y2 = inputs[4];
     
-        // F t2 = r0 * r0;
-        // F t3 = t2 * eta * 0.3141592654e1;
-        // F t4 = 0.1e1 + epsV1;
-        // F t5 = t4 * t4;
+        // F t1 = 0.1e1 + epsV1;
+        // F t2 = t1 * t1;
+        // F t4 = r0 * r0;
+        // F t5 = t4 * eta * t2;
         // F t6 = X1 * X1;
         // F t8 = X2 * X1;
         // F t10 = X2 * X2;
-        // F t12 = -Y2 + Y1;
+        // F t12 = Y1 - Y2;
         // F t13 = t12 * t12;
-        // F t15 = 0.4e1 * t6 - 0.8e1 * t8 + 0.4e1 * t10 + 0.2e1 * t13;
-        // F t17 = dt * dt;
-        // F t18 = 0.1e1 / t17;
-        // F t21 = pow(t6 - 0.2e1 * t8 + t10 + t13, 0.2e1);
+        // F t19 = pow(t6 - 0.2e1 * t8 + t10 + t13, 0.2e1);
+        // F t20 = 0.1e1 / t19;
+        // F t21 = dt * dt;
         // F t22 = 0.1e1 / t21;
-        // F t23 = t22 * t18;
-        // F t26 = t23 * t15 * t5 * t3 / 0.4e1;
-        // F t28 = X2 * t12;
-        // F t33 = t23 * (X1 * t12 - t28) * t5 * t3 / 0.2e1;
-        // F t34 = t6 * X1;
-        // F t36 = 0.4e1 * t34 * Fprev11;
-        // F t38 = 0.12e2 * Fprev11 * X2;
-        // F t39 = -Fprev12 - Fprev21;
-        // F t40 = Y1 * t39;
-        // F t41 = 0.2e1 * t40;
-        // F t42 = -Y2 * t39;
+        // F t23 = t22 * t20;
+        // F t33 = t23 * 0.3141592654e1 * (X1 * t12 - X2 * t12) * t5 / 0.2e1;
+        // F t35 = t4 * eta * t1;
+        // F t36 = t6 * X1;
+        // F t41 = -Fprev12 - Fprev21;
+        // F t42 = Y1 * t41;
         // F t43 = 0.2e1 * t42;
-        // F t44 = 0.4e1 * x1;
-        // F t45 = 0.4e1 * x2;
-        // F t49 = 0.6e1 * t10 * Fprev11;
-        // F t50 = -Y1 * t39;
-        // F t51 = 0.2e1 * t50;
-        // F t52 = Y2 * t39;
-        // F t53 = 0.2e1 * t52;
-        // F t54 = t51 + t53 - t44 + t45;
-        // F t60 = 0.2e1 * Fprev11 * Y1 - 0.2e1 * Fprev11 * Y2 - y1 + y2;
-        // F t61 = t12 * t60;
-        // F t65 = t10 * X2;
-        // F t67 = 0.4e1 * t65 * Fprev11;
-        // F t68 = t41 + t43 + t44 - t45;
-        // F t72 = t40 + t42 + x1 - x2;
-        // F t79 = t23 * (-t36 + t6 * (t38 + t41 + t43 + t44 - t45) + 0.2e1 * X1 * (X2 * t54 - t49 - t61) + t67 + t10 * t68 + 0.2e1 * X2 * t61 + 0.2e1 * t13 * t72) * t4 * t3 / 0.2e1;
-        // F t83 = -t23 * t15 * t5 * t3 / 0.4e1;
-        // F t89 = t23 * (-X1 * t12 + t28) * t5 * t3 / 0.2e1;
-        // F t94 = 0.2e1 * t6 - 0.4e1 * t8 + 0.2e1 * t10 + 0.4e1 * t13;
-        // F t98 = t23 * t94 * t5 * t3 / 0.4e1;
-        // F t103 = Fprev22 * Y1;
-        // F t104 = 0.4e1 * t103;
-        // F t105 = Fprev22 * Y2;
-        // F t106 = 0.4e1 * t105;
-        // F t107 = 0.2e1 * y2;
-        // F t108 = 0.2e1 * y1;
-        // F t113 = t104 - t106 - t108 + t107;
-        // F t115 = t50 + t52 + x2 - x1;
-        // F t116 = t12 * t115;
-        // F t125 = -t103 + t105 + y1 - y2;
-        // F t132 = t23 * (0.2e1 * t34 * t39 + t6 * (-0.6e1 * X2 * t39 - t104 + t106 - t107 + t108) + 0.2e1 * X1 * (X2 * t113 + 0.3e1 * t10 * t39 - t116) - 0.2e1 * t65 * t39 - t10 * t113 + 0.2e1 * X2 * t116 + 0.4e1 * t13 * t125) * t4 * t3 / 0.2e1;
-        // F t136 = -t23 * t94 * t5 * t3 / 0.4e1;
-        // F t137 = Fprev11 * Fprev11;
-        // F t139 = Fprev12 * Fprev12;
-        // F t140 = Fprev12 * Fprev21;
-        // F t142 = Fprev21 * Fprev21;
-        // F t143 = Fprev22 * Fprev22;
-        // F t145 = 0.2e1 * t137 + t139 + 0.2e1 * t140 + t142 + 0.2e1 * t143;
-        // F t146 = t6 * t6;
-        // F t150 = y2 - y1;
-        // F t151 = Fprev12 * t150;
-        // F t152 = Fprev21 * t150;
-        // F t153 = -x2 + x1;
-        // F t155 = 0.2e1 * t153 * Fprev11;
-        // F t163 = -Fprev12 * t150 - Fprev21 * t150 + t155;
-        // F t166 = Y1 * Y1;
-        // F t168 = 0.2e1 * t166 * t145;
-        // F t169 = -Y2 * t145;
-        // F t171 = -Fprev12 * t153;
-        // F t172 = -Fprev21 * t153;
-        // F t174 = -0.2e1 * t150 * Fprev22;
-        // F t177 = 0.2e1 * Y1 * (0.2e1 * t169 + t171 + t172 - t174);
-        // F t178 = Y2 * Y2;
-        // F t180 = 0.2e1 * t178 * t145;
-        // F t181 = Fprev12 * t153;
-        // F t182 = Fprev21 * t153;
-        // F t184 = Y2 * (t181 + t182 + t174);
-        // F t185 = 0.2e1 * t184;
-        // F t186 = x1 * x1;
-        // F t187 = 0.2e1 * t186;
-        // F t188 = x1 * x2;
-        // F t189 = 0.4e1 * t188;
-        // F t190 = x2 * x2;
-        // F t191 = 0.2e1 * t190;
-        // F t192 = t150 * t150;
-        // F t197 = t151 + t152 - t155;
-        // F t218 = t12 * (Y1 * t163 + Y2 * t197 + t150 * t153);
-        // F t222 = t10 * t10;
-        // F t232 = t137 + t139 / 0.2e1 + t140 + t142 / 0.2e1 + t143;
-        // F t250 = -t12 * t60;
-        // F t263 = t23 * (t36 + t6 * (-t38 + t51 + t53 - t44 + t45) + 0.2e1 * X1 * (X2 * t68 - t250 + t49) - t67 + t10 * t54 + 0.2e1 * X2 * t250 + 0.2e1 * t13 * t115) * t4 * t3 / 0.2e1;
-        // F t273 = t12 * t72;
-        // F t288 = t23 * (-0.2e1 * t34 * t39 + t6 * (0.6e1 * X2 * t39 + t104 - t106 + t107 - t108) + 0.2e1 * X1 * (-X2 * t113 - 0.3e1 * t10 * t39 - t273) + 0.2e1 * t65 * t39 + t10 * t113 + 0.2e1 * X2 * t273 - 0.4e1 * t13 * t125) * t4 * t3 / 0.2e1;
+        // F t44 = -Y2 * t41;
+        // F t45 = 0.2e1 * t44;
+        // F t46 = 0.4e1 * x1;
+        // F t47 = 0.4e1 * x2;
+        // F t52 = -Y1 * t41;
+        // F t54 = Y2 * t41;
+        // F t63 = (0.2e1 * Fprev11 * Y1 - 0.2e1 * Fprev11 * Y2 - y1 + y2) * t12;
+        // F t67 = t10 * X2;
+        // F t81 = t23 * 0.3141592654e1 * (-0.4e1 * t36 * Fprev11 + t6 * (0.12e2 * Fprev11 * X2 + t43 + t45 + t46 - t47) + 0.2e1 * X1 * (-0.6e1 * t10 * Fprev11 + X2 * (0.2e1 * t52 + 0.2e1 * t54 - t46 + t47) - t63) + 0.4e1 * t67 * Fprev11 + t10 * (t43 + t45 + t46 - t47) + 0.2e1 * X2 * t63 + 0.2e1 * t13 * (t42 + t44 + x1 - x2)) * t35 / 0.2e1;
+        // F t95 = Fprev22 * Y1;
+        // F t96 = 0.4e1 * t95;
+        // F t97 = Fprev22 * Y2;
+        // F t98 = 0.4e1 * t97;
+        // F t99 = 0.2e1 * y2;
+        // F t100 = 0.2e1 * y1;
+        // F t105 = t96 - t98 - t100 + t99;
+        // F t108 = (t52 + t54 + x2 - x1) * t12;
+        // F t124 = t23 * 0.3141592654e1 * (0.2e1 * t36 * t41 + t6 * (-0.6e1 * X2 * t41 + t100 - t96 + t98 - t99) + 0.2e1 * X1 * (X2 * t105 + 0.3e1 * t10 * t41 - t108) - 0.2e1 * t67 * t41 - t10 * t105 + 0.2e1 * X2 * t108 + 0.4e1 * t13 * (-t95 + t97 + y1 - y2)) * t35 / 0.2e1;
+        // F t126 = Fprev11 * Fprev11;
+        // F t128 = Fprev12 * Fprev12;
+        // F t129 = Fprev12 * Fprev21;
+        // F t131 = Fprev21 * Fprev21;
+        // F t132 = Fprev22 * Fprev22;
+        // F t134 = 0.2e1 * t126 + t128 + 0.2e1 * t129 + t131 + 0.2e1 * t132;
+        // F t135 = t6 * t6;
+        // F t139 = y2 - y1;
+        // F t140 = Fprev12 * t139;
+        // F t141 = Fprev21 * t139;
+        // F t142 = -x2 + x1;
+        // F t144 = 0.2e1 * t142 * Fprev11;
+        // F t152 = -Fprev12 * t139 - Fprev21 * t139 + t144;
+        // F t155 = Y1 * Y1;
+        // F t157 = 0.2e1 * t155 * t134;
+        // F t158 = -Y2 * t134;
+        // F t160 = -Fprev12 * t142;
+        // F t161 = -Fprev21 * t142;
+        // F t163 = -0.2e1 * t139 * Fprev22;
+        // F t166 = 0.2e1 * Y1 * (0.2e1 * t158 + t160 + t161 - t163);
+        // F t167 = Y2 * Y2;
+        // F t169 = 0.2e1 * t167 * t134;
+        // F t170 = Fprev12 * t142;
+        // F t171 = Fprev21 * t142;
+        // F t173 = Y2 * (t170 + t171 + t163);
+        // F t174 = 0.2e1 * t173;
+        // F t175 = x1 * x1;
+        // F t176 = 0.2e1 * t175;
+        // F t177 = x1 * x2;
+        // F t178 = 0.4e1 * t177;
+        // F t179 = x2 * x2;
+        // F t180 = 0.2e1 * t179;
+        // F t181 = t139 * t139;
+        // F t186 = t140 + t141 - t144;
+        // F t207 = (Y1 * t152 + Y2 * t186 + t139 * t142) * t12;
+        // F t211 = t10 * t10;
+        // F t221 = t126 + t128 / 0.2e1 + t129 + t131 / 0.2e1 + t132;
     
-        // F unknown[5][5];
+        // F unknown[3][3];
     
-        // unknown[0][0] = t26;
+        // unknown[0][0] = t23 * 0.3141592654e1 * (0.4e1 * t6 - 0.8e1 * t8 + 0.4e1 * t10 + 0.2e1 * t13) * t5 / 0.4e1;
         // unknown[0][1] = t33;
-        // unknown[0][2] = t79;
-        // unknown[0][3] = t83;
-        // unknown[0][4] = t89;
+        // unknown[0][2] = t81;
         // unknown[1][0] = t33;
-        // unknown[1][1] = t98;
-        // unknown[1][2] = t132;
-        // unknown[1][3] = t89;
-        // unknown[1][4] = t136;
-        // unknown[2][0] = t79;
-        // unknown[2][1] = t132;
-        // unknown[2][2] = t22 * t18 * (t146 * t145 + 0.2e1 * t34 * (-0.2e1 * X2 * t145 + t151 + t152 - t155) + t6 * (0.6e1 * X2 * t163 + 0.6e1 * t10 * t145 + t168 + t177 + t180 + t185 + t187 - t189 + t191 + t192) + 0.2e1 * X1 * (-0.2e1 * t65 * t145 + 0.3e1 * t10 * t197 + X2 * (-0.2e1 * t166 * t145 + 0.2e1 * Y1 * (0.2e1 * Y2 * t145 + t174 + t181 + t182) - 0.2e1 * t178 * t145 + 0.2e1 * Y2 * (t171 + t172 - t174) - t187 + t189 - t191 - t192) - t218) + t222 * t145 + 0.2e1 * t65 * t163 + t10 * (t168 + t177 + t180 + t185 + t187 - t189 + t191 + t192) + 0.2e1 * X2 * t218 + 0.2e1 * t13 * (t166 * t232 + Y1 * (t169 + t171 + t172 - t174) + t178 * t232 + t184 + t186 / 0.2e1 - t188 + t190 / 0.2e1 + t192)) * t3 / 0.2e1;
-        // unknown[2][3] = t263;
-        // unknown[2][4] = t288;
-        // unknown[3][0] = t83;
-        // unknown[3][1] = t89;
-        // unknown[3][2] = t263;
-        // unknown[3][3] = t26;
-        // unknown[3][4] = t33;
-        // unknown[4][0] = t89;
-        // unknown[4][1] = t136;
-        // unknown[4][2] = t288;
-        // unknown[4][3] = t33;
-        // unknown[4][4] = t98;
+        // unknown[1][1] = t23 * 0.3141592654e1 * (0.2e1 * t6 - 0.4e1 * t8 + 0.2e1 * t10 + 0.4e1 * t13) * t5 / 0.4e1;
+        // unknown[1][2] = t124;
+        // unknown[2][0] = t81;
+        // unknown[2][1] = t124;
+        // unknown[2][2] = t22 * t20 * 0.3141592654e1 * (t135 * t134 + 0.2e1 * t36 * (-0.2e1 * X2 * t134 + t140 + t141 - t144) + t6 * (0.6e1 * X2 * t152 + 0.6e1 * t10 * t134 + t157 + t166 + t169 + t174 + t176 - t178 + t180 + t181) + 0.2e1 * X1 * (-0.2e1 * t67 * t134 + 0.3e1 * t10 * t186 + X2 * (-0.2e1 * t155 * t134 + 0.2e1 * Y1 * (0.2e1 * Y2 * t134 + t163 + t170 + t171) - 0.2e1 * t167 * t134 + 0.2e1 * Y2 * (t160 + t161 - t163) - t176 + t178 - t180 - t181) - t207) + t211 * t134 + 0.2e1 * t67 * t152 + t10 * (t157 + t166 + t169 + t174 + t176 - t178 + t180 + t181) + 0.2e1 * X2 * t207 + 0.2e1 * t13 * (t155 * t221 + Y1 * (t158 + t160 + t161 - t163) + t167 * t221 + t173 + t175 / 0.2e1 - t177 + t179 / 0.2e1 + t181)) * t4 * eta / 0.2e1;
     
-        // processMapleOutput(reinterpret_cast<F *>(unknown), value.hessian, 5, 5);
+        // processMapleOutput(reinterpret_cast<F *>(unknown), value.hessian, 3, 3);
+    
     
 
         // // now scatter into the big H:

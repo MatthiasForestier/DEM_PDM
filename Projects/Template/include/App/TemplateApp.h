@@ -49,7 +49,7 @@ class TemplateApp : public CRLSubApp {
     /// Dynamic Convergence
     I exponent_convergence_threshold = -3;
     F dynamic_convergence_threshold;
-    I maxIter = 1000; 
+    I maxIter = 2000; 
     I breach = 0;
     I calls = 0;
 
@@ -64,6 +64,7 @@ class TemplateApp : public CRLSubApp {
    Optimization::OptimizationStatus energyMinimizationStep();
    void reinitializeGlobalState();
    Optimization::OptimizationStatus energyMinimizationStepDyn();
+   void onBigToggleChanged();
 
    public:
     /// Template Builder functions

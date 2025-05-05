@@ -352,8 +352,7 @@ public:
     std::vector<Particle2D> createRandomParticles2D();
     void updateEffectiveNeighborCounts();
     void updateEffectiveNeighborCountsFinal();
-    ScenarioObject createScenarioCircle2D(int numSegments, F radius);
-    ScenarioObject createScenarioSquare2D();
+
     void detectBoundaryCollision2D(Particle2D &p) const;
     void detectParticleCollision();
     VectorXF getGlobalState();

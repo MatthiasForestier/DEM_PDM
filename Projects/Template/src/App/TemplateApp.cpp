@@ -52,10 +52,10 @@ void TemplateApp::makeConfigWindow() {
     if (ImGui::Button("Reload Particles")) {
         sim.particles2D = sim.createRandomParticles2D();
         for (auto &p : sim.particles2D) p.ix = 0;
-        sim.insertParticlesIntoGrid();
-        reinitializeGlobalState();
         breach = 0;
         calls = 0;
+        sim.insertParticlesIntoGrid();
+        reinitializeGlobalState();
         logger.clear();
         sim.minParticles();
         sim.buildMassMatrix(sim.M);
@@ -104,22 +104,23 @@ void TemplateApp::makeConfigWindow() {
 
         if (ImGui::Button("Create Scenario")) {
             scenarioObjectCreation();
-            sim.buildGridDataStructure();
-            sim.insertParticlesIntoGrid();
+            onBigToggleChanged();
             std::cout << "New scenario object created and stored!\n";
         }
 
-        if (ImGui::CollapsingHeader("Scenario Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
-            // Toggle animation on/off (this flag is also updated by startScenarioAnimation, so the checkbox is optional)
-            // ImGui::Checkbox("Animate Scenario Object", &sim.animateScenario);
-            // Button to start/reset the animation.
-            if (ImGui::Button("Start Animation")) {
-                scenarioObjectCreation();
-                sim.startScenarioAnimation();
+        if (shapeIndex !=2){
+            if (ImGui::CollapsingHeader("Scenario Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+                // Toggle animation on/off (this flag is also updated by startScenarioAnimation, so the checkbox is optional)
+                // ImGui::Checkbox("Animate Scenario Object", &sim.animateScenario);
+                // Button to start/reset the animation.
+                if (ImGui::Button("Start Animation")) {
+                    scenarioObjectCreation();
+                    sim.startScenarioAnimation();
+                }
+                // Allow user to change the duration and distance.
+                ImGui::InputDouble("Animation Duration (s)", &sim.animationDuration, 1.0, 5.0, "%.1f");
+                ImGui::InputDouble("Animation Distance", &sim.animationDistance, 0.1, 1.0, "%.1f");
             }
-            // Allow user to change the duration and distance.
-            ImGui::InputDouble("Animation Duration (s)", &sim.animationDuration, 1.0, 5.0, "%.1f");
-            ImGui::InputDouble("Animation Distance", &sim.animationDistance, 0.1, 1.0, "%.1f");
         }
     }
 
@@ -153,19 +154,24 @@ void TemplateApp::makeConfigWindow() {
 
     if (rebuild && !sim.scenarioObjects.empty())
     {
-        sim.renormalise();
         if (auto* tun = dynamic_cast<Tunnel2D*>(sim.scenarioObjects.front().get()))
         {
             tun->halfWidth  = sim.L * 0.5f;
             tun->halfLength = sim.L * 0.5f;
             tun->generateVertices();
         }
-        sim.buildGridDataStructure();
-        sim.insertParticlesIntoGrid();
+        onBigToggleChanged(); 
         sim.renormalise();
-        sim.updateNeighborLists();
     }
 
+}
+
+void TemplateApp::onBigToggleChanged()
+{
+    sim.buildGridDataStructure();      // rebuild & zero the grid
+    sim.insertParticlesIntoGrid();     // repopulate with current discs
+    sim.updateNeighborLists();         // refresh contact graph
+    reinitializeGlobalState();     // sync globalState_{0,1,2}, M, stride
 }
 
 void TemplateApp::reinitializeGlobalState() {
