@@ -11,14 +11,18 @@ SplashScreenResult showSplashScreen() {
     result.use3D = false;
     result.exportMode = false;
     // Default values for export mode parameters:
-    result.timeStep = 0.01;
-    result.dynamic = false;
+    result.timeStep = 0.001;
+    result.dynamic = true;
     result.viscosity = false;
-    result.numSimulations = 1;
-    result.simulationTime = 5.0;
+    result.numSimulations = 5;
+    result.simulationTime = 3.0;
     result.animationStartTime = 6.0;
+    result.exponent_convergence_threshold = -3;
+    result.maxIter = 3000;
     result.numParticles = 100;
-    
+    result.V0 = 0.5;
+    result.L = 1;
+    result.densify = true;
     bool done = false;
 
     if (!glfwInit()) {
@@ -84,9 +88,11 @@ SplashScreenResult showSplashScreen() {
             ImGui::InputDouble("Time Step", &result.timeStep, 0.001, 0.01, "%.3f");
             ImGui::Checkbox("Dynamic", &result.dynamic);
             ImGui::InputInt("Epsilon Dynamic", &result.exponent_convergence_threshold);
+            ImGui::InputDouble("Tolerable iterations", &result.maxIter);
             ImGui::Checkbox("Viscosity", &result.viscosity);
             ImGui::InputInt("Number of Simulations", &result.numSimulations);
             ImGui::InputInt("Number of Particles", &result.numParticles);
+            ImGui::Checkbox("Increase density", &result.densify);
             ImGui::InputDouble("Simulation Duration (s)", &result.simulationTime, 1.0, 5.0, "%.1f");
             ImGui::InputDouble("Animation Start (s)", &result.animationStartTime, 0.1, 1.0, "%.2f");
 

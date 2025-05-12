@@ -47,6 +47,7 @@ void TemplateApp::makeConfigWindow() {
 
     if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
         sim.makeConfigMenu();
+        ImGui::Checkbox("Dense?", &sim.densify);
     }
 
     if (ImGui::Button("Reload Particles")) {
@@ -398,6 +399,9 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
         if (iter >= maxIter) {
             std::cout << "Maximum iterations reached. Stopping simulation." << std::endl;
             // std::cout << iter << std::endl;
+            std::cout << "[Dyn] grad₀ = " << grad.norm()
+            << ", thresh = "  << dynamic_convergence_threshold
+            << ", maxIter = " << maxIter << '\n';
             optimize = false;
             breach += 1;
             break;

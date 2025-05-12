@@ -10,21 +10,23 @@
 #include "Projects/Template/include/Model/MassSpring.h"
 
 struct SplashScreenResult {
-    // For interactive mode:
+    // For Interactive mode:
     bool use3D;         // Select 2D (false) or 3D (true)
-    bool exportMode;    // If true, run export (batch) mode instead of launching the interactive app.
-    double timeStep;          // Simulation time step.
+    bool exportMode;    // If true, run export (batch) mode instead of launching the Interactive app.
+    F timeStep;          // Simulation time step.
     bool dynamic;             // Whether to use the dynamic formulation.
-    int exponent_convergence_threshold;
+    I exponent_convergence_threshold;
     bool viscosity;            // Whether friction is enabled.
-    int numSimulations;       // Number of simulation runs.
-    int numParticles;         // Number of particles in the simulation.
-    double simulationTime;    // Duration (in seconds) for each simulation run.
-    double animationStartTime;
-    int scenarioShapeIndex = 0;
+    I numSimulations;       // Number of simulation runs.
+    I numParticles;         // Number of particles in the simulation.
+    F simulationTime;    // Duration (in seconds) for each simulation run.
+    F animationStartTime;
+    I scenarioShapeIndex = 2;
     bool periodicX;
-    double V0;
-    double L;
+    bool densify;
+    F V0;
+    F L;
+    F maxIter;
 };
 
 class TemplateApp : public CRLSubApp {
@@ -80,9 +82,9 @@ class TemplateApp : public CRLSubApp {
 
     void makeRunCheckWindow() override;
 
-    void checkGradient(int order = 1);
+    void checkGradient(I order = 1);
 
-    bool callbackKeyPressed(const CRLControlState &control_state, int key) override;
+    bool callbackKeyPressed(const CRLControlState &control_state, I key) override;
 
     [[nodiscard]] std::string getName() const override { return "Template"; }
 

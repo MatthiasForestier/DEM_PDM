@@ -191,7 +191,7 @@ public:
 class Simulation {
 public:
     // World parameters.
-    F timeStep = 1e-2;
+    F timeStep = 1e-3;
     F lambda = 1e0;
     Vector3F gravity = Vector3F(0.0, 1, 0.0);
     F endTime = 1.0;
@@ -219,6 +219,7 @@ public:
     bool is_elliptical = false;
     F radiusMean = 0.05;  // [m]
     F radiusStd = 0.005;  // [m]
+    bool densify = false;
 
     // Grid-related parameters.
     F maxParticleRadius = 0.0;
@@ -264,7 +265,7 @@ public:
     // Shear‐flow parameters
     bool periodicX       = false;    // wrap X
     F  fluidViscosity    = 1.0f;     // ν in F_drag = ν ||v_p−v_f||²
-    F  V0                = 0.1f;     // max fluid speed
+    F  V0                = 0.5f;     // max fluid speed
     F  L                 = 1.0f;     // half‐height of tunnel
     F     pinK      = 1e-2;       // << spring stiffness
     F     pinXref   = 0.0;        // << reference position
@@ -299,6 +300,7 @@ public:
           is_elliptical(other.is_elliptical),
           radiusMean(other.radiusMean),
           radiusStd(other.radiusStd),
+          densify(other.densify),
           maxParticleRadius(other.maxParticleRadius),
           cellSize(other.cellSize),
           numCellsX(other.numCellsX),

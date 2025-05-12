@@ -103,6 +103,7 @@ void Simulation::makeConfigMenu()
 }
 
 
+
 /* ---------------------------------------------------------------------- */
 /*  GRID / NEIGHBOUR STRUCTURES                                           */
 /* ---------------------------------------------------------------------- */
@@ -960,85 +961,226 @@ void Simulation::updateEffectiveNeighborCountsFinal() {
     }
 }
 
-std::vector<Particle2D> Simulation::createRandomParticles2D() {
-    std::vector<Particle2D> particles;
-    particles.reserve(numParticles);
+std::vector<Particle2D> Simulation::createRandomParticles2D()
+{
+    /* ------------------------------------------------------------ 0. Parameters */
+    constexpr F SHRINK        = 0.60f;      // initial radius scale (0–1)
+    constexpr int MAX_RELAX   = 180;        // number of growth sweeps
+    constexpr F STEP_FRAC     = 0.52f;      // ≥0.5 → resolve pair overlap in one push
+    constexpr F TOL           = 1e-10f;     // stop when max overlap < TOL·R_mean
+    constexpr F JITTER        = 0.05f;      // random ±5 % R_mean offset
+    constexpr F MAX_PACK_FRAC = 0.88f;      // safety: abort if requested area exceeds 88 % of domain
 
-    // ------------------------------------------------------------
-    // ❶  Find the area where we may drop particles
-    // ------------------------------------------------------------
-    F xMin = -0.8 , xMax = 0.8;          // ← fall‑back values
-    F yMin = -0.5 , yMax = 0.5;
+    /* ------------------------------------------------------------ 1. Bounds */
+    F xMin = -0.8f, xMax = 0.8f;
+    F yMin = -0.5f, yMax = 0.5f;
 
     if (!scenarioObjects.empty()) {
         if (auto* tun = dynamic_cast<Tunnel2D*>(scenarioObjects[0].get())) {
             const BoundingBox& BB = tun->getBoundingBox();
-            xMin = BB.min_x;
+            xMin = BB.min_x; 
             xMax = BB.max_x;
-            yMin = BB.min_y;
+            yMin = BB.min_y; 
             yMax = BB.max_y;
         }
     }
 
+    /* domain area (needed for safety check) */
+    const F domainArea = (xMax - xMin) * (yMax - yMin);
+
+    /* ------------------------------------------------------------ 2. RNG */
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::normal_distribution<F> radiusDist(radiusMean, radiusStd);   
-    std::uniform_real_distribution<F> distX(xMin, xMax);
+    std::normal_distribution<F>  rDist(radiusMean, radiusStd);
+    std::uniform_real_distribution<F> uni(-1.0f, 1.0f);
 
-    // ------------------------------------------------------------
-    // ❷  Rejection sampling with exact periodic distance
-    // ------------------------------------------------------------
-    for (int i = 0; i < numParticles; ++i) {
-        bool ok = false;
-        int attempts = 0;
-        Particle2D cand(0.0, *this);
-        cand.ix = 0;  // start in the base cell
-
-        while (!ok && attempts < maxAttemptsPerParticle) {
-            ++attempts;
-
-            // sample radius
-            F r = std::max<F>(F(0.01), radiusDist(gen));
-            cand = Particle2D(r, *this);
-            cand.ix = 0;
-
-            // sample position in the fundamental domain
-            std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
-            cand.pos(0) = distX(gen);
-            cand.pos(1) = distY(gen);
-
-            // enforce pos.x ∈ [xMin, xMax)
-            // (distX already does this, but just to be safe)
-            cand.pos(0) = std::clamp(cand.pos(0), xMin, std::nextafter(xMax, xMin));
-
-            // overlap test using the new 4‑arg periodicDx
-            ok = true;
-            for (auto& ex : particles) {
-                F dx = periodicDx(
-                    cand.pos(0), cand.ix,
-                    ex.pos(0),   ex.ix
-                );
-                F dy = cand.pos(1) - ex.pos(1);
-                F dist = std::sqrt(dx*dx + dy*dy);
-                if (dist < cand.radius + ex.radius) {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-
-        if (ok) {
-            cand.X0 = cand.pos;
-            particles.push_back(std::move(cand));
-        } else {
-            std::cerr << "createRandomParticles2D: could not place particle "
-                      << (i+1) << " after " << maxAttemptsPerParticle << " tries.\n";
+    /* quick over‑crowding check for RSA branch (approximate) */
+    {
+        const F probeArea = static_cast<F>(M_PI) * radiusMean * radiusMean;
+        if (!densify && static_cast<F>(numParticles) * probeArea > MAX_PACK_FRAC * domainArea) {
+            std::cerr << "[RSA] Too many particles for the available space (area ratio > "
+                      << MAX_PACK_FRAC << "). Aborting.\n";
+            return {};
         }
     }
 
-    // All new particles have ix == 0 and pos.x in [xMin, xMax).
-    return particles;
+    /* plain RSA branch (unchanged) */
+    if (!densify) {
+        std::vector<Particle2D> particles;
+        particles.reserve(numParticles);
+        std::uniform_real_distribution<F> distX(xMin, xMax);
+
+        for (int i = 0; i < numParticles; ++i) {
+            bool ok = false;
+            int attempts = 0;
+            Particle2D cand(0.0f, *this);
+
+            while (!ok && attempts < maxAttemptsPerParticle) {
+                ++attempts;
+                F r = std::max<F>(F(0.01f), rDist(gen));
+                cand = Particle2D(r, *this);
+                cand.ix = 0;
+
+                std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
+                cand.pos << distX(gen), distY(gen);
+                cand.pos(0) = std::clamp(cand.pos(0), xMin, std::nextafter(xMax, xMin));
+
+                ok = true;
+                for (auto& ex : particles) {
+                    F dx = periodicDx(cand.pos(0), cand.ix, ex.pos(0), ex.ix);
+                    F dy = cand.pos(1) - ex.pos(1);
+                    if (std::sqrt(dx*dx + dy*dy) < cand.radius + ex.radius) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if (ok) {
+                cand.X0 = cand.pos;
+                particles.push_back(std::move(cand));
+            } else {
+                std::cerr << "[RSA] could not place #" << i + 1 << "\n";
+            }
+        }
+        return particles;
+    }
+
+    /* dense mode (densify == true) */
+    auto clampX = [&](Particle2D& p) {
+        if (periodicX) {
+            p.pos(0) = wrapX(p.pos(0));
+        } else {
+            F r = p.radius;
+            p.pos(0) = std::clamp(p.pos(0), xMin + r, xMax - r);
+        }
+    };
+
+    /* sample target radii */
+    std::vector<F> R_target(numParticles);
+    for (F& r : R_target) {
+        r = std::max<F>(F(0.01f), rDist(gen));
+    }
+
+    /* safety: total area check */
+    F totalArea = 0.0f;
+    const F PI = std::acos(F(-1));
+    for (const F r : R_target) {
+        totalArea += PI * r * r;
+    }
+    if (totalArea > MAX_PACK_FRAC * domainArea) {
+        std::cerr << "[densify] Requested " << numParticles
+                  << " particles cannot fit (area ratio = " << (totalArea / domainArea)
+                  << " > " << MAX_PACK_FRAC << "). Aborting.\n";
+        return {};
+    }
+
+    /* hex seed */
+    const F a  = 2.0f * radiusMean * SHRINK;
+    const F ay = a * std::sqrt(3.0f) / 2.0f;
+    std::vector<Particle2D> discs;
+    discs.reserve(numParticles);
+
+    int row = 0;
+    for (F y = yMin + ay; y < yMax - ay && discs.size() < static_cast<size_t>(numParticles);
+         y += ay, ++row)
+    {
+        bool odd = row & 1;
+        for (F x = xMin + (odd ? a * 0.5f : a);
+             x < xMax - a && discs.size() < static_cast<size_t>(numParticles);
+             x += a)
+        {
+            Particle2D p(R_target[discs.size()] * SHRINK, *this);
+            p.pos << x, y;
+            p.X0 = p.pos;
+            clampX(p);
+            discs.push_back(std::move(p));
+        }
+    }
+
+    /* top‑up if lattice too small */
+    std::uniform_real_distribution<F> distX(xMin, xMax);
+    int topupAttempts = 0;
+    const int MAX_TOPUP = 50 * numParticles;
+    while (discs.size() < static_cast<size_t>(numParticles) &&
+           topupAttempts < MAX_TOPUP)
+    {
+        ++topupAttempts;
+        F r = R_target[discs.size()] * SHRINK;
+        Particle2D p(r, *this);
+        std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
+        p.pos << distX(gen), distY(gen);
+        p.X0 = p.pos;
+        clampX(p);
+        discs.push_back(std::move(p));
+    }
+    if (discs.size() < static_cast<size_t>(numParticles)) {
+        std::cerr << "[densify] Could seed only " << discs.size()
+                  << " / " << numParticles << " discs. Aborting.\n";
+        return {};
+    }
+
+    /* jitter */
+    for (auto& p : discs) {
+        p.pos(0) += uni(gen) * JITTER * radiusMean;
+        p.pos(1) += uni(gen) * JITTER * radiusMean;
+        p.pos(1) = std::clamp(p.pos(1), yMin + p.radius, yMax - p.radius);
+        clampX(p);
+    }
+
+    /* wall relax helper */
+    auto wallRelax = [&](std::vector<Particle2D>& ps) {
+        for (auto& p : ps) {
+            F pen = (yMin + p.radius) - p.pos(1);
+            if (pen > 0) p.pos(1) += pen + TOL * radiusMean;
+            pen = p.pos(1) - (yMax - p.radius);
+            if (pen > 0) p.pos(1) -= pen + TOL * radiusMean;
+            clampX(p);
+        }
+    };
+
+    /* growth + relax */
+    for (int sweep = 0; sweep < MAX_RELAX; ++sweep) {
+        F g = std::pow((F)(sweep + 1) / (F)MAX_RELAX, 3.0f);
+        for (size_t i = 0; i < discs.size(); ++i) {
+            discs[i].radius = SHRINK * (1.0f - g) * R_target[i] + g * R_target[i];
+        }
+        wallRelax(discs);
+
+        F maxOv;
+        int innerIter = 0;
+        const int INNER_LIMIT = 10000;
+        do {
+            if (++innerIter > INNER_LIMIT) {
+                std::cerr << "[densify] Relaxation stalled (" << innerIter << "). Aborting.\n";
+                return {};
+            }
+            maxOv = 0.0f;
+            std::shuffle(discs.begin(), discs.end(), gen);
+            for (size_t i = 0; i < discs.size(); ++i)
+            for (size_t j = i + 1; j < discs.size(); ++j) {
+                auto& a = discs[i];
+                auto& b = discs[j];
+                F dx = periodicDx(a.pos(0), a.ix, b.pos(0), b.ix);
+                F dy = a.pos(1) - b.pos(1);
+                F d2 = dx*dx + dy*dy;
+                F rSum = a.radius + b.radius;
+                if (d2 >= rSum*rSum || d2 < 1e-12f) continue;
+                F d = std::sqrt(d2);
+                F ov = rSum - d;
+                maxOv = std::max(maxOv, ov);
+                F push = STEP_FRAC * ov / d;
+                a.pos(0) += dx * push;  a.pos(1) += dy * push;
+                b.pos(0) -= dx * push;  b.pos(1) -= dy * push;
+                clampX(a); clampX(b);
+            }
+            wallRelax(discs);
+        } while (maxOv > TOL * radiusMean);
+    }
+
+    for (auto& p : discs) p.X0 = p.pos;
+    return discs;
 }
+
 
 
 void Simulation::colorParticleRed(int particleID) {
