@@ -20,46 +20,6 @@ std::string getCurrentDateTimeString() {
 }
 
 void exportSimulationForML(const SplashScreenResult &params) {
-    // Create a TemplateApp instance using the splash screen parameters.
-    TemplateApp app(params);
-    
-    // Override simulation parameters with export-mode values.
-    app.sim.timeStep = params.timeStep;
-    app.sim.dynamic = params.dynamic;
-    app.dynamic_convergence_threshold = pow(10.0, params.exponent_convergence_threshold);
-    app.sim.viscosity = params.viscosity;
-    app.sim.numParticles = params.numParticles;
-    app.sim.periodicX    = params.periodicX;
-    app.sim.V0             = params.V0;
-    app.sim.L              = params.L;
-    // IMPORTANT: If you're using 2D particles, make sure use3D is false.
-    app.sim.use3D = false;  
-    app.sim.endTime = params.simulationTime;
-
-    // Set up scenario.
-    app.sim.scenarioObjects.clear();
-    
-    if (params.scenarioShapeIndex == 0) {
-        // Circle
-        app.sim.scenarioObjects.push_back(
-            std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f))
-        );
-    }
-    else if (params.scenarioShapeIndex == 1) {
-        // Square
-        app.sim.scenarioObjects.push_back(
-            std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f))
-        );
-    }
-    else /* = 2: Tunnel */ {
-        // Tunnel2D: halfLength = 2.0f (visual), halfWidth = sim.L/2
-        float halfLen = 2.0f;
-        float halfWid = app.sim.L * 0.5f;
-        app.sim.scenarioObjects.push_back(
-            std::make_unique<Tunnel2D>(halfLen, halfWid, Vector3F(0.0f, 0.0f, 0.0f))
-        );
-        app.sim.experiment = Simulation::Experiment::ShearFlow;
-    }
         
     // Ensure output directory exists.
     const std::string outputDir = "output";
@@ -82,81 +42,153 @@ void exportSimulationForML(const SplashScreenResult &params) {
     outfile << "run,time,energy,bool_dynamic,bool_viscosity," 
         << "gravity_y,overlapParam,interactionParam,viscosity_coeff,sigma,alpha,"
         << "scenarioObj_x,scenarioObj_y,scenarioObj_z,scenarioShapeIndex,"
-        << "scenarioObj_min_x,scenarioObj_max_x,scenarioObj_min_y,scenarioObj_max_y";
-    for (int i = 0; i < app.sim.numParticles; i++) {
+        << "scenarioObj_min_x, scenarioObj_max_x, scenarioObj_min_y, scenarioObj_max_y";
+    for (int i = 0; i < params.numParticles; i++) {
         outfile << ",p" << i << "_x,p" << i << "_y,p" << i << "_radius,p" << i << "_mass";
     }
     outfile << "\n";
 
-    // Outer loop: run the simulation multiple times.
-    for (int run = 0; run < params.numSimulations; run++) {
-        // Reinitialize simulation state:
-        app.sim.buildGridDataStructure();
-        app.sim.particles2D = app.sim.createRandomParticles2D();
+    const int   MAX_SEED_ATTEMPTS = 50;          // per run
+    const bool  ABORT_IF_STUCK    = true;        // stop whole export after too many failures
+    //------------------------------------------------------------------
+
+    for (int run = 0; run < params.numSimulations; /* run++ only on success! */)
+    {
+        // Create a TemplateApp instance using the splash screen parameters.
+        TemplateApp app(params);
+        
+        // Override simulation parameters with export-mode values.
+        app.sim.timeStep = params.timeStep;
+        app.sim.dynamic = params.dynamic;
+        app.dynamic_convergence_threshold = pow(10.0, params.exponent_convergence_threshold);
+        app.sim.viscosity = params.viscosity;
+        app.sim.numParticles = params.numParticles;
+        app.sim.V0             = params.V0;
+        app.sim.L              = params.L;
+        app.sim.densify = params.densify;
+        app.maxIter = params.maxIter;
+        app.sim.use3D = false;  
+        app.sim.endTime = params.simulationTime;
+
+        // Set up scenario.
+        app.sim.scenarioObjects.clear();
+        
+        if (params.scenarioShapeIndex == 0) {
+            // Circle
+            app.sim.scenarioObjects.push_back(
+                std::make_unique<Circle>(1.1f, 64, Vector3F(0.0f, 0.0f, 0.0f))
+            );
+        }
+        else if (params.scenarioShapeIndex == 1) {
+            // Square
+            app.sim.scenarioObjects.push_back(
+                std::make_unique<Square>(1.1f, 0.9f, Vector3F(0.0f, 0.0f, 0.0f))
+            );
+        }
+        else /* = 2: Tunnel */ {
+            // Tunnel2D: halfLength = 2.0f (visual), halfWidth = sim.L/2
+            float halfLen = app.sim.L * 0.5f;
+            float halfWid = app.sim.L * 0.5f;
+            app.sim.scenarioObjects.push_back(
+                std::make_unique<Tunnel2D>(halfLen, halfWid, Vector3F(0.0f, 0.0f, 0.0f))
+            );
+            app.sim.experiment = Simulation::Experiment::ShearFlow;
+            app.sim.periodicX    = params.periodicX;
+        }
+        //------------------------------------------------------------------
+        // 0.1  Try to seed particles --------------------------------------
+        //------------------------------------------------------------------
+        int tries = 0;
+        do {
+            app.sim.buildGridDataStructure();
+            app.sim.particles2D = app.sim.createRandomParticles2D();
+            ++tries;
+
+            if (tries >= MAX_SEED_ATTEMPTS && ABORT_IF_STUCK) {
+                std::cerr << "[Export] Could not place particles after "
+                        << tries << " attempts – aborting export.\n";
+                outfile.close();
+                return;
+            }
+        }
+        while (app.sim.particles2D.empty());
+
+        // 0.2  A valid set – continue with normal initialisation ----------
+        //------------------------------------------------------------------
         for (auto &p : app.sim.particles2D) p.ix = 0;
         app.reinitializeGlobalState();
+        app.sim.minParticles();
         app.sim.buildMassMatrix(app.sim.M);
         app.sim.insertParticlesIntoGrid();
         app.reinitializeGlobalState();
-        
+
+        //------------------------------------------------------------------
+        // 1.  Time-stepping loop (exactly what you already have)
+        //------------------------------------------------------------------
+        const double outputInterval   = 0.01;                 // s
+        const int    outputEverySteps = static_cast<int>(
+                                        std::round(outputInterval /
+                                                    app.sim.timeStep));   // e.g. 1
+        int step = 0;
         double t = 0.0;
+        app.optimize = true;
         // Simulation loop for one run.
         while (t < app.sim.endTime) {
-            // Perform an optimization step.
-             // Perform an optimization step and check for max‑iteration failure.
-            Optimization::OptimizationStatus status;
-            if (app.sim.dynamic) {
-                status = app.energyMinimizationStepDyn();
-            } else {
-                status = app.energyMinimizationStep();
-            }
-            // If we failed to converge (max‑iter reached), skip the rest of this run:
-            if (status != 1) {
-                std::cout << "Run " << run 
-                        << ", time " << t 
-                        << ": max iterations reached, skipping to next run.\n";
+            //------------------------------------------------------------------
+            // 1. Optimization step
+            //------------------------------------------------------------------
+            Optimization::OptimizationStatus status =
+                app.sim.dynamic ? app.energyMinimizationStepDyn()
+                                : app.energyMinimizationStep();
+        
+            // Stop this run if the solver failed to converge.
+            if (app.optimize == false) {
+                std::cout << "Run " << run
+                          << ", time " << t
+                          << ": max iterations reached, skipping to next run.\n";
                 break;
             }
+        
+            //------------------------------------------------------------------
+            // 2. Advance the simulation state
+            //------------------------------------------------------------------
             app.sim.updateScenarioAnimation(app.sim.timeStep);
-            
+            t += app.sim.timeStep;                    // <-- increment the clock!
+            ++step;
+            //------------------------------------------------------------------
+            // 3. Diagnostics & CSV output
+            //------------------------------------------------------------------
             F energy;
             app.sim.compute_energy(energy);
-
-            // Write the current state to the CSV.
-            // We assume app.sim.particles2D is a container of particles, each having a position (as a 2D vector) and a radius.
-            outfile << run << "," << t << "," << energy << ","
-                    << app.sim.dynamic << ","
-                    << app.sim.viscosity << ","
-                    << app.sim.gravity(1) << ","         // gravity_z
-                    << app.sim.overlapParam << ","         // overlapParam
-                    << app.sim.interactionParam << ","     // interactionParam
-                    << app.sim.viscosityCoeff << ","      // viscosity_coeff
-                    << app.sim.kernelSigma << ","                // sigma
-                    << app.sim.alpha << ",";               // alpha
-            // Scenario object position.
-            // We assume at least one scenario object exists.
-            outfile << app.sim.scenarioObjects[0]->position(0) << ","  // scenarioObj_x
-                    << app.sim.scenarioObjects[0]->position(1) << ","  // scenarioObj_y
-                    << app.sim.scenarioObjects[0]->position(2) << ","  // scenarioObj_theta
-                    << params.scenarioShapeIndex << ","; // scenarioShapeIndex
-
-            // Retrieve and output bounding box values.
-            BoundingBox bb = app.sim.scenarioObjects[0]->getBoundingBox();
-            outfile << bb.min_x << "," << bb.max_x << "," << bb.min_y << "," << bb.max_y;
-            
-            for (int i = 0; i < app.sim.numParticles; i++) {
-                const auto &particle = app.sim.particles2D[i];
-                // Access the particle's x and y from its position vector, and its radius.
-                outfile << "," << particle.pos[0]
-                        << "," << particle.pos[1]
-                        << "," << particle.radius
-                        << "," << particle.mass;
+        
+            // Use fmod for a robust “every 0.01 s” check with floating point.
+            if (step % outputEverySteps == 0) {
+                outfile << run                      << ',' << t            << ','
+                        << energy                   << ',' << app.sim.dynamic          << ','
+                        << app.sim.viscosity        << ',' << app.sim.gravity(1)       << ','
+                        << app.sim.overlapParam     << ',' << app.sim.interactionParam << ','
+                        << app.sim.viscosityCoeff   << ',' << app.sim.kernelSigma      << ','
+                        << app.sim.alpha            << ',';
+        
+                // Scenario object pose (assume at least one object exists).
+                const auto &obj = *app.sim.scenarioObjects[0];
+                outfile << obj.position(0) << ',' << obj.position(1) << ',' << obj.position(2) << ','
+                        << params.scenarioShapeIndex << ',';
+        
+                // Bounding box.
+                const BoundingBox bb = obj.getBoundingBox();
+                outfile << bb.min_x << ',' << bb.max_x << ',' << bb.min_y << ',' << bb.max_y;
+        
+                // Particle data.
+                for (int i = 0; i < app.sim.numParticles; ++i) {
+                    const auto &p = app.sim.particles2D[i];
+                    outfile << ',' << p.pos[0] << ',' << p.pos[1] << ',' << p.radius << ',' << p.mass;
+                }
+                outfile << '\n';
             }
-            outfile << "\n";
-            
-            // Advance simulation time.
-            t += app.sim.timeStep;
         }
+        ++run;
+        app.optimize = false;
     }
     
     outfile.close();

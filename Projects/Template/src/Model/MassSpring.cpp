@@ -983,6 +983,13 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
             yMin = BB.min_y; 
             yMax = BB.max_y;
         }
+        if (auto* square = dynamic_cast<Square*>(scenarioObjects[0].get())){
+            const BoundingBox& BB = square->getBoundingBox();
+            xMin = BB.min_x; 
+            xMax = BB.max_x;
+            yMin = BB.min_y; 
+            yMax = BB.max_y;
+        }
     }
 
     /* domain area (needed for safety check) */
