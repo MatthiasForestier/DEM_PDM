@@ -42,7 +42,7 @@ void exportSimulationForML(const SplashScreenResult &params) {
     outfile << "run,time,energy,bool_dynamic,bool_viscosity," 
         << "gravity_y,overlapParam,interactionParam,viscosity_coeff,sigma,alpha,"
         << "scenarioObj_x,scenarioObj_y,scenarioObj_z,scenarioShapeIndex,"
-        << "scenarioObj_min_x, scenarioObj_max_x, scenarioObj_min_y, scenarioObj_max_y";
+        << "scenarioObj_min_x,scenarioObj_max_x,scenarioObj_min_y,scenarioObj_max_y";
     for (int i = 0; i < params.numParticles; i++) {
         outfile << ",p" << i << "_x,p" << i << "_y,p" << i << "_radius,p" << i << "_mass";
     }
