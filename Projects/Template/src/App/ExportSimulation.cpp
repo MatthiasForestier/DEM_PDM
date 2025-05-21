@@ -56,7 +56,7 @@ void exportSimulationForML(const SplashScreenResult &params) {
     {
         // Create a TemplateApp instance using the splash screen parameters.
         TemplateApp app(params);
-        
+
         // Override simulation parameters with export-mode values.
         app.sim.timeStep = params.timeStep;
         app.sim.dynamic = params.dynamic;
@@ -69,7 +69,8 @@ void exportSimulationForML(const SplashScreenResult &params) {
         app.maxIter = params.maxIter;
         app.sim.use3D = false;  
         app.sim.endTime = params.simulationTime;
-
+        app.sim.overlapParam = 100000000;
+        app.sim.interactionParam = 10000000;
         // Set up scenario.
         app.sim.scenarioObjects.clear();
         
@@ -95,12 +96,12 @@ void exportSimulationForML(const SplashScreenResult &params) {
             app.sim.experiment = Simulation::Experiment::ShearFlow;
             app.sim.periodicX    = params.periodicX;
         }
+        app.sim.buildGridDataStructure(); 
         //------------------------------------------------------------------
         // 0.1  Try to seed particles --------------------------------------
         //------------------------------------------------------------------
         int tries = 0;
-        do {
-            app.sim.buildGridDataStructure();
+        while (app.sim.particles2D.empty()){
             app.sim.particles2D = app.sim.createRandomParticles2D();
             ++tries;
 
@@ -111,16 +112,16 @@ void exportSimulationForML(const SplashScreenResult &params) {
                 return;
             }
         }
-        while (app.sim.particles2D.empty());
 
         // 0.2  A valid set – continue with normal initialisation ----------
         //------------------------------------------------------------------
-        for (auto &p : app.sim.particles2D) p.ix = 0;
+        app.sim.buildGridDataStructure(); 
+        app.sim.updateCellSizeFromParticles();
+        app.sim.insertParticlesIntoGrid();
+        app.sim.updateNeighborLists();
         app.reinitializeGlobalState();
         app.sim.minParticles();
         app.sim.buildMassMatrix(app.sim.M);
-        app.sim.insertParticlesIntoGrid();
-        app.reinitializeGlobalState();
 
         //------------------------------------------------------------------
         // 1.  Time-stepping loop (exactly what you already have)
@@ -140,7 +141,6 @@ void exportSimulationForML(const SplashScreenResult &params) {
             Optimization::OptimizationStatus status =
                 app.sim.dynamic ? app.energyMinimizationStepDyn()
                                 : app.energyMinimizationStep();
-        
             // Stop this run if the solver failed to converge.
             if (app.optimize == false) {
                 std::cout << "Run " << run

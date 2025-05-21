@@ -376,8 +376,8 @@ VectorXF Simulation::getGlobalState() {
 
 void Simulation::setGlobalState(const VectorXF &state) {
     globalPositions = state;
-    applyGlobalPositions(globalPositions);
-    // renormalise(); 
+    applyGlobalPositions(globalPositions); 
+    //renormalise();
 }
 
 void Simulation::updateAuxiliaryStructures() {
@@ -460,14 +460,12 @@ void Simulation::compute_energy(F &value) const
         detectBoundaryCollision2D(p);
 
         /* ---------------- gravitational potential ------------------------- */
-        if (experiment == Experiment::Default)
-        {
-            const F y0 = scenarioObjects.empty()
-                        ? F(0)                       /* fallback datum       */
-                        : scenarioObjects[0]->getBoundingBox().min_y;
+        const F y0 = scenarioObjects.empty()
+                    ? F(0)                       /* fallback datum       */
+                    : scenarioObjects[0]->getBoundingBox().min_y;
 
-            value += EnergyFunctions::gravity(p, *this, y0);
-        }
+        value += EnergyFunctions::gravity(p, *this, y0);
+        
         /* volumetric strain energy ----------------- */
         if (boolSoftDEM)
         { 
@@ -481,16 +479,16 @@ void Simulation::compute_energy(F &value) const
     for (std::size_t i = 0; i < particles2D.size(); ++i)
     {
         const Particle2D &p = particles2D[i];
-
         for (int j : p.neighborIndices)
         {
             if (j <= (int)i) continue;
             const Particle2D &q = particles2D[j];
 
-            if (!boolSoftDEM)
+            if (!boolSoftDEM){
                 value += EnergyFunctions::interParticleOld(p, q, *this);
-            else
+            }else{
                 value += EnergyFunctions::interParticleSoft(p, q, *this);
+            }
         }
     }
 
@@ -517,8 +515,7 @@ void Simulation::compute_gradient(VectorXF &g) const {
 
         int xIdx = S*ii, yIdx = xIdx+1, epsIdx = xIdx+2;
         // gravity
-        if (experiment == Experiment::Default)
-            g[yIdx] += GradientFunctions::gravityGradient(p, *this);
+        g[yIdx] += GradientFunctions::gravityGradient(p, *this);
 
         // volumetric
         if (boolSoftDEM)
@@ -833,7 +830,7 @@ void Simulation::shearFlowProfile(F y,
 
 F Simulation::wrapX(F x) const {
     const F W = maxX - minX;
-
+    // std::cout << W << std::endl;
     // If the domain has not been initialised yet (W == 0)
     // simply return the original coordinate to avoid Inf / NaN.
     if (W == 0 || !periodicX)
@@ -983,13 +980,6 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
             yMin = BB.min_y; 
             yMax = BB.max_y;
         }
-        if (auto* square = dynamic_cast<Square*>(scenarioObjects[0].get())){
-            const BoundingBox& BB = square->getBoundingBox();
-            xMin = BB.min_x; 
-            xMax = BB.max_x;
-            yMin = BB.min_y; 
-            yMax = BB.max_y;
-        }
     }
 
     /* domain area (needed for safety check) */
@@ -1051,7 +1041,7 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
         }
         return particles;
     }
-
+    // std::cout << "Dense" << std::endl;
     /* dense mode (densify == true) */
     auto clampX = [&](Particle2D& p) {
         if (periodicX) {
@@ -1097,6 +1087,7 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
              x += a)
         {
             Particle2D p(R_target[discs.size()] * SHRINK, *this);
+            p.ix = 0;
             p.pos << x, y;
             p.X0 = p.pos;
             clampX(p);
@@ -1115,23 +1106,25 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
         F r = R_target[discs.size()] * SHRINK;
         Particle2D p(r, *this);
         std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
+        p.ix = 0;
         p.pos << distX(gen), distY(gen);
         p.X0 = p.pos;
         clampX(p);
         discs.push_back(std::move(p));
+        // std::cout << p.pos(0) << std::endl;
     }
     if (discs.size() < static_cast<size_t>(numParticles)) {
         std::cerr << "[densify] Could seed only " << discs.size()
                   << " / " << numParticles << " discs. Aborting.\n";
         return {};
     }
-
     /* jitter */
     for (auto& p : discs) {
         p.pos(0) += uni(gen) * JITTER * radiusMean;
         p.pos(1) += uni(gen) * JITTER * radiusMean;
         p.pos(1) = std::clamp(p.pos(1), yMin + p.radius, yMax - p.radius);
         clampX(p);
+        // std::cout << p.pos(0) << std::endl;
     }
 
     /* wall relax helper */
@@ -1179,6 +1172,7 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
                 a.pos(0) += dx * push;  a.pos(1) += dy * push;
                 b.pos(0) -= dx * push;  b.pos(1) -= dy * push;
                 clampX(a); clampX(b);
+                // std::cout << a.pos(0) << std::endl;
             }
             wallRelax(discs);
         } while (maxOv > TOL * radiusMean);

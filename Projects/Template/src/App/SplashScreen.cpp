@@ -19,9 +19,9 @@ SplashScreenResult showSplashScreen() {
     result.animationStartTime = 6.0;
     result.exponent_convergence_threshold = -3;
     result.maxIter = 3000;
-    result.numParticles = 40;
+    result.numParticles = 104;
     result.V0 = 0.5;
-    result.L = 0.5;
+    result.L = 1.0;
     result.densify = true;
     bool done = false;
 
