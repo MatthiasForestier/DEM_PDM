@@ -91,5 +91,6 @@ class TemplateApp : public CRLSubApp {
     void getViewerData(std::vector<CRLViewerData> &viewer_data, CRLCamera &viewer_camera) override;
 
     void showLoggerWindow() override;
-    
+
+    void exportCurrentFrameToCSV();   
 };

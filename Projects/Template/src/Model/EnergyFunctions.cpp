@@ -42,12 +42,12 @@ namespace EnergyFunctions {
                 F δxR = (px + r) - sq->max_x;
                 F δyB = sq->min_y - (py - r);
                 F δyT = (py + r) - sq->max_y;
-                F δx = δxR>0?δxR:(δxL>0?δxL:0);
-                F δy = δyT>0?δyT:(δyB>0?δyB:0);
-                if (δx||δy) {
-                    F n = std::sqrt(δx*δx + δy*δy);
-                    E += oneThird * sim.overlapParam * cube(n);
-                }
+                F V = 0;
+                if (δxR > 0) V += oneThird*sim.overlapParam*cube(δxR);
+                if (δxL > 0) V += oneThird*sim.overlapParam*cube(δxL);
+                if (δyT > 0) V += oneThird*sim.overlapParam*cube(δyT);
+                if (δyB > 0) V += oneThird*sim.overlapParam*cube(δyB);
+                E += V;
             }
         } else if (p.BoundaryCollision==3) {
         // tunnel top/bot
@@ -192,27 +192,15 @@ namespace GradientFunctions {
                     if (δx==0 && δy==0) continue;
 
                     F k = sim.overlapParam;
-                    // corner
-                    if (δx > 0 && δy > 0) {
-                        F n = std::sqrt(δx*δx + δy*δy);
-                        F coef = k * n;
-                        fx += coef * sx * δx;
-                        fy += coef * sy * δy;
-                        if (sim.boolSoftDEM)
-                            feps += k * n * (δx * r + δy * r);  
+                    if (δx > 0){
+                        fx += sx * k * δx * δx;
+                        if(sim.boolSoftDEM)
+                            feps += k * δx * δx * p.radius;
                     }
-                    // single face
-                    else {
-                        if (δx > 0){
-                            fx += sx * k * δx * δx;
-                            if(sim.boolSoftDEM)
-                                feps += k * δx * δx * r;
-                        }
-                        if (δy > 0){
-                            fy += sy * k * δy * δy;
-                            if(sim.boolSoftDEM)
-                                feps += k * δy * δy * r;
-                        }
+                    if (δy > 0){
+                        fy += sy * k * δy * δy;
+                        if(sim.boolSoftDEM)
+                            feps += k * δy * δy * p.radius;
                     }
                 }
             }
@@ -457,50 +445,21 @@ namespace HessianFunctions {
                 F k = sim.overlapParam;
                 // corner
                 if (!sim.boolSoftDEM){
-                    if (δx>0 && δy>0) {
-                        F n    = std::sqrt(δx*δx + δy*δy);
-                        F invn = F(1)/n;
-                        F Hxx  = k*(n + δx*δx*invn);
-                        F Hyy  = k*(n + δy*δy*invn);
-                        F Hxy  = k*(δx*δy*invn*sx*sy);
-                        add(xIdx,xIdx,Hxx); add(yIdx,yIdx,Hyy);
-                        add(xIdx,yIdx,Hxy); add(yIdx,xIdx,Hxy);
-                    }
-                    // face
-                    else {
-                        if (δx>0) add(xIdx,xIdx,2*k*δx);
-                        if (δy>0) add(yIdx,yIdx,2*k*δy);
-                    }
+                    if (δx>0) add(xIdx,xIdx,2*k*δx);
+                    if (δy>0) add(yIdx,yIdx,2*k*δy);
+
                 }else{
-                    if (δx>0 && δy>0) {
-                        F n    = std::sqrt(δx*δx + δy*δy);
-                        F invn = F(1)/n;
-                        F Hxx  = k*(n + δx*δx*invn);
-                        F Hyy  = k*(n + δy*δy*invn);
-                        F Hxy  = k*(δx*δy*invn*sx*sy);
-                        F Hxe = k * (r * (n*sx + (δx + δy)*δx*invn));
-                        F Hye = k * (r * (n*sy + (δx + δy)*δy*invn));
-                        F Hee = k * sqr(r) * (2 * n + sqr(δx + δy)*invn);
-                        add(xIdx,eIdx,Hxe); add(eIdx,xIdx,Hxe);
-                        add(yIdx,eIdx,Hye); add(eIdx,yIdx,Hye);
-                        add(eIdx,eIdx,Hee);
-                        add(xIdx,xIdx,Hxx); add(yIdx,yIdx,Hyy);
-                        add(xIdx,yIdx,Hxy); add(yIdx,xIdx,Hxy);
+                    if (δx>0){
+                        add(xIdx,xIdx,2*k*δx);
+                        add(xIdx,eIdx,2*k*δx*sx*r);
+                        add(eIdx,xIdx,2*k*δx*sx*r);
+                        add(eIdx,eIdx,2*k*δx*sqr(r));
                     }
-                    // face
-                    else {
-                        if (δx>0){
-                            add(xIdx,xIdx,2*k*δx);
-                            add(xIdx,eIdx,2*k*δx*sx*r);
-                            add(eIdx,xIdx,2*k*δx*sx*r);
-                            add(eIdx,eIdx,2*k*δx*sqr(r));
-                        }
-                        if (δy>0){ 
-                            add(yIdx,yIdx,2*k*δy);
-                            add(yIdx,eIdx,2*k*δy*sy*r);
-                            add(eIdx,yIdx,2*k*δy*sy*r);
-                            add(eIdx,eIdx,2*k*δy*sqr(r));
-                        }
+                    if (δy>0){ 
+                        add(yIdx,yIdx,2*k*δy);
+                        add(yIdx,eIdx,2*k*δy*sy*r);
+                        add(eIdx,yIdx,2*k*δy*sy*r);
+                        add(eIdx,eIdx,2*k*δy*sqr(r));
                     }
                 }
             }

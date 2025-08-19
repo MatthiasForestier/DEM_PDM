@@ -124,10 +124,6 @@ class Particle2D {
 public:
     // Position: [x, y]
     Vector2F pos;
-    // Velocity: [x_dot, y_dot]
-    Vector2F vel;
-    // Acceleration: [x_ddot, y_ddot]
-    Vector2F acc;
 
     // ---------- deformation of particles -----------------
     F epsV = 0.0;
@@ -163,10 +159,6 @@ class Particle3D {
 public:
     // Position: [x, y, z]
     Vector3F pos;
-    // Velocity: [x_dot, y_dot, z_dot]
-    Vector3F vel;
-    // Acceleration: [x_ddot, y_ddot, z_ddot]
-    Vector3F acc;
 
     F epsV = 0.0;
     F epsVdot = 0.0;
@@ -191,20 +183,20 @@ public:
 class Simulation {
 public:
     // World parameters.
-    F timeStep = 1e-3;
+    F timeStep = 1e-2;
     F lambda = 1e0;
     Vector3F gravity = Vector3F(0.0, 0.0, 0.0);
     F endTime = 1.0;
     F outputInterval = 1e-2;
     std::string outputDirectory = "output";
-    I numParticles = 100;
+    I numParticles = 42;
     const int maxAttemptsPerParticle = 10000;
     std::vector<std::unique_ptr<ScenarioObject>> scenarioObjects;
     bool use3D = false;
 
     // Particle-related parameters.
-    F density = 2780.0; // [kg/m^3]
-    F overlapParam = 100000000;
+    F density = 100.0; // [kg/m^3]
+    F overlapParam = 10000000;
     F interactionParam = 10000000;
     F Young  = 215000;     // material E (could be global)
     F Poisson = 0.3;    // ν  (or exactly 0.5 for incompressible trick)
@@ -217,9 +209,14 @@ public:
     bool is_circular = true;
     bool is_square = false;
     bool is_elliptical = false;
-    F radiusMean = 0.05;  // [m]
+    F radiusMean = 0.04;  // [m]
     F radiusStd = 0.005;  // [m]
     bool densify = false;
+    bool bidispersed = false;  ///< NEW – toggle two‑size mode
+    F  radiusBig   = 0.05;     ///< used only if bidispersed==true
+    F  radiusSmall = 0.02;
+    int numBig     = 0;        ///< ditto
+    int numSmall   = 0;
 
     // Grid-related parameters.
     F maxParticleRadius = 0.0;
@@ -264,9 +261,10 @@ public:
 
     // Shear‐flow parameters
     bool periodicX       = false;    // wrap X
-    F  fluidViscosity    = 1.0f;     // ν in F_drag = ν ||v_p−v_f||²
-    F  V0                = 0.5f;     // max fluid speed
-    F  L                 = 1.0f;     // half‐height of tunnel
+    bool periodicY       = false;    // wrap Y
+    F  fluidViscosity    = 10.0f;     // ν in F_drag = ν ||v_p−v_f||²
+    F  V0                = 0.02f;     // max fluid speed
+    F  L                 = 0.5f;     // half‐height of tunnel
     F     pinK      = 1e-2;       // << spring stiffness
     F     pinXref   = 0.0;        // << reference position
 
@@ -301,6 +299,11 @@ public:
           radiusMean(other.radiusMean),
           radiusStd(other.radiusStd),
           densify(other.densify),
+          bidispersed(other.bidispersed),  
+          radiusBig(other.radiusBig),
+          radiusSmall(other.radiusSmall), 
+          numBig(other.numBig),
+          numSmall(other.numSmall),    
           maxParticleRadius(other.maxParticleRadius),
           cellSize(other.cellSize),
           numCellsX(other.numCellsX),
@@ -332,6 +335,7 @@ public:
           M(other.M),
           experiment(other.experiment),
           periodicX(other.periodicX),
+          periodicY(other.periodicY),
           fluidViscosity(other.fluidViscosity),
           V0(other.V0),
           L(other.L),
@@ -350,6 +354,7 @@ public:
     F eps_n(F delta, F Lc) const;
     F depsn_dDelta(F delta, F Rbar) const;
     F depsn_dEps(F delta,F Rbar,F dRbar_dEps) const;
+    F min_image(F dx, F W);
     void makeConfigMenu();
     std::vector<Particle2D> createRandomParticles2D();
     void updateEffectiveNeighborCounts();

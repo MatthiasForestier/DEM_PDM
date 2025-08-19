@@ -50,6 +50,11 @@ void exportSimulationForML(const SplashScreenResult &params) {
 
     const int   MAX_SEED_ATTEMPTS = 50;          // per run
     const bool  ABORT_IF_STUCK    = true;        // stop whole export after too many failures
+    const int    WARMUP_STEPS     = 500;          // <-- new: don’t record before this
+    const double outputInterval   = 0.01;         // s
+    const int    outputEverySteps = static_cast<int>(
+                                    std::round(outputInterval /
+                                                params.timeStep));
     //------------------------------------------------------------------
 
     for (int run = 0; run < params.numSimulations; /* run++ only on success! */)
@@ -65,12 +70,10 @@ void exportSimulationForML(const SplashScreenResult &params) {
         app.sim.numParticles = params.numParticles;
         app.sim.V0             = params.V0;
         app.sim.L              = params.L;
-        app.sim.densify = params.densify;
+        app.sim.densify = false;
         app.maxIter = params.maxIter;
         app.sim.use3D = false;  
         app.sim.endTime = params.simulationTime;
-        app.sim.overlapParam = 100000000;
-        app.sim.interactionParam = 10000000;
         // Set up scenario.
         app.sim.scenarioObjects.clear();
         
@@ -96,12 +99,14 @@ void exportSimulationForML(const SplashScreenResult &params) {
             app.sim.experiment = Simulation::Experiment::ShearFlow;
             app.sim.periodicX    = params.periodicX;
         }
+        app.onBigToggleChanged(); 
         app.sim.buildGridDataStructure(); 
         //------------------------------------------------------------------
         // 0.1  Try to seed particles --------------------------------------
         //------------------------------------------------------------------
         int tries = 0;
         while (app.sim.particles2D.empty()){
+            app.sim.densify = params.densify;
             app.sim.particles2D = app.sim.createRandomParticles2D();
             ++tries;
 
@@ -118,11 +123,11 @@ void exportSimulationForML(const SplashScreenResult &params) {
         app.sim.buildGridDataStructure(); 
         app.sim.updateCellSizeFromParticles();
         app.sim.insertParticlesIntoGrid();
+        app.sim.renormalise();
         app.sim.updateNeighborLists();
         app.reinitializeGlobalState();
         app.sim.minParticles();
         app.sim.buildMassMatrix(app.sim.M);
-
         //------------------------------------------------------------------
         // 1.  Time-stepping loop (exactly what you already have)
         //------------------------------------------------------------------
@@ -147,6 +152,7 @@ void exportSimulationForML(const SplashScreenResult &params) {
                           << ", time " << t
                           << ": max iterations reached, skipping to next run.\n";
                 break;
+                run -= 2;
             }
         
             //------------------------------------------------------------------
@@ -162,7 +168,8 @@ void exportSimulationForML(const SplashScreenResult &params) {
             app.sim.compute_energy(energy);
         
             // Use fmod for a robust “every 0.01 s” check with floating point.
-            if (step % outputEverySteps == 0) {
+            if (step >= WARMUP_STEPS &&                // <-- record only after step 500
+                step % outputEverySteps == 0) {
                 outfile << run                      << ',' << t            << ','
                         << energy                   << ',' << app.sim.dynamic          << ','
                         << app.sim.viscosity        << ',' << app.sim.gravity(1)       << ','

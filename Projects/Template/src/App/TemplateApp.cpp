@@ -8,6 +8,9 @@
 
 #include <iostream>
 #include <random>
+#include <fstream>
+#include <filesystem>   // C++17 – if you’re on <17 replace with std::ifstream probe.
+#include <sstream>
 
 /* uniform wrapper for ImGui scalar inputs -------------------------------- */
 void scalarInput(const char* label, F& var, F step, const char* fmt = "%.3f")
@@ -47,7 +50,6 @@ void TemplateApp::makeConfigWindow() {
 
     if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
         sim.makeConfigMenu();
-        ImGui::Checkbox("Dense?", &sim.densify);
     }
 
     if (ImGui::Button("Reload Particles")) {
@@ -139,8 +141,8 @@ void TemplateApp::makeConfigWindow() {
     if (sim.experiment == Simulation::Experiment::ShearFlow) {
         ImGui::Checkbox("Periodic X", &sim.periodicX);
         ImGui::InputDouble("nu (drag)",        &sim.fluidViscosity, 0.01, 0.05, "%.4f");
-        ImGui::InputDouble("V0 (max speed)",  &sim.V0,             0.1 ,      1.0, "%.3f");
-        ImGui::InputDouble("L (half height)", &sim.L,              0.1 ,      1.0, "%.3f");
+        ImGui::InputDouble("V0 (max speed)",  &sim.V0,             0.1 ,      0.5, "%.3f");
+        ImGui::InputDouble("L (half height)", &sim.L,              0.1 ,      0.5, "%.3f");
     }
 
     /* rebuild tunnel on size / BC change -------------------------------- */
@@ -163,6 +165,10 @@ void TemplateApp::makeConfigWindow() {
         }
         onBigToggleChanged(); 
         sim.renormalise();
+    }
+
+    if (ImGui::Button("Export CSV")) {
+        exportCurrentFrameToCSV();
     }
 
 }
@@ -237,6 +243,7 @@ void TemplateApp::makeRunCheckWindow() {
     if (ImGui::Button("Print breach and calls")) {
         std::cout << "Breach: " << breach << ", Calls: " << calls << std::endl;
     }
+
 }
 
 void TemplateApp::showLoggerWindow() {
@@ -413,7 +420,7 @@ Optimization::OptimizationStatus TemplateApp::energyMinimizationStepDyn() {
     sim.updateAuxiliaryStructures();
     sim.updateEffectiveNeighborCountsFinal();
     sim.globalState_2 = sim.globalState_1;
-    sim.globalState_1 = globalState_0;
+    sim.globalState_1 = sim.getGlobalState();
 
     F currentObjective;
     optimization.objective_function(globalState_0, currentObjective);
@@ -638,3 +645,43 @@ bool TemplateApp::callbackKeyPressed(const CRLControlState& control_state, int k
 
 
 
+void TemplateApp::exportCurrentFrameToCSV()
+{
+    const std::size_t N = sim.particles2D.size();
+    if (N == 0) { std::cerr << "[CSV] No particles – nothing written\n"; return; }
+
+    const std::string fileName = std::to_string(N) + "_output_frames.csv";
+    const bool newFile = !std::filesystem::exists(fileName);
+
+    std::ofstream out(fileName, std::ios::app);
+    if (!out) { std::cerr << "[CSV] Cannot open " << fileName << " for writing\n"; return; }
+
+    /* ------------------------------------------------------------------ */
+    /* (A) header – only once                                             */
+    /* ------------------------------------------------------------------ */
+    if (newFile)
+    {
+        for (std::size_t i = 0; i < N; ++i) {
+            out << "p" << i << "_x,p" << i << "_y,p" << i << "_eps,p" << i << "_m,p" << i << "_r";
+            if (i != N-1) out << ',';
+        }
+        out << '\n';
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* (B) data row (one frame)                                            */
+    /* ------------------------------------------------------------------ */
+    std::ostringstream row;
+    row.setf(std::ios::fixed);                       // nicer formatting
+    row.precision(8);
+
+    for (std::size_t i = 0; i < N; ++i) {
+        const auto &p = sim.particles2D[i];
+        row << p.pos(0) << ',' << p.pos(1) << ',';
+        if (sim.boolSoftDEM)
+            row << p.epsV << ',';  // soft-DEM: use ε_V
+        row << p.mass   << ',' << p.radius;
+        if (i != N-1) row << ',';
+    }
+    out << row.str() << '\n';
+}

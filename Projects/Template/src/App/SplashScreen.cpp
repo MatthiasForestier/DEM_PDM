@@ -11,17 +11,18 @@ SplashScreenResult showSplashScreen() {
     result.use3D = false;
     result.exportMode = false;
     // Default values for export mode parameters:
-    result.timeStep = 0.001;
+    result.timeStep = 0.01;
     result.dynamic = true;
     result.viscosity = false;
-    result.numSimulations = 5;
-    result.simulationTime = 3.0;
-    result.animationStartTime = 6.0;
+    result.periodicX = false;
+    result.numSimulations = 50;
+    result.simulationTime = 8.0;
+    result.animationStartTime = 20.0;
     result.exponent_convergence_threshold = -3;
     result.maxIter = 3000;
-    result.numParticles = 104;
-    result.V0 = 0.5;
-    result.L = 1.0;
+    result.numParticles = 40;
+    result.V0 = 0.02;
+    result.L = 0.5;
     result.densify = true;
     bool done = false;
 

@@ -60,6 +60,11 @@ F Simulation::depsn_dEps(const F delta,
     /* total derivative */
     return depsn_dDelta(delta, Rbar) * ddelta_dEps + depsn_dRbar * dRbar_dEps;
 }
+
+F Simulation::min_image(F dx, F W) {
+    dx -= std::round(dx / W) * W;      // map to (-W/2, W/2]
+    return dx;
+}
 /* ---------------------------------------------------------------------- */
 /*  CONFIG MENU                                                           */
 /* ---------------------------------------------------------------------- */
@@ -75,9 +80,22 @@ void Simulation::makeConfigMenu()
     /* particles --------------------------------------------------------- */
     if (ImGui::CollapsingHeader("Particles"))
     {
-        ImGui::InputInt("Count", &numParticles);
-        scalarInput("Radius mean", radiusMean, 0.01, "%.3f");
-        scalarInput("Radius std", radiusStd , 0.01, "%.4f");
+        ImGui::Checkbox("Bidispersed", &bidispersed);
+
+        if (!bidispersed)                                               // ── old
+        {
+            ImGui::InputInt("Count", &numParticles);
+            scalarInput("Radius mean", radiusMean, 0.01, "%.3f");
+            scalarInput("Radius std",  radiusStd , 0.01, "%.4f");
+        }
+        else                                                             // ── new
+        {
+            ImGui::InputInt("Big – count",   &numBig);
+            scalarInput ("Big – radius",     radiusBig  , 0.01, "%.3f");
+
+            ImGui::InputInt("Small – count", &numSmall);
+            scalarInput ("Small – radius",   radiusSmall, 0.01, "%.3f");
+        }
     }
 
     /* contact / material ----------------------------------------------- */
@@ -94,6 +112,10 @@ void Simulation::makeConfigMenu()
 
         bool old = boolSoftDEM;
         ImGui::Checkbox("Soft-DEM (1 DoF/particle)", &boolSoftDEM);
+        if (!bidispersed)                                               // ── old
+        {
+            ImGui::Checkbox("Dense?", &densify);
+        }
 
         /* if the user toggled, rebuild the global state */
         if (old != boolSoftDEM)
@@ -109,9 +131,22 @@ void Simulation::makeConfigMenu()
 /* ---------------------------------------------------------------------- */
 void Simulation::updateCellSizeFromParticles()
 {
+
+    // Start with the largest possible value and look for the smallest radius
+    // F minParticleRadius = std::numeric_limits<F>::max();
+    // for (const auto& p : particles2D)
+    //     minParticleRadius = std::min(minParticleRadius, p.radius);
+
+    // cellSize = two * minParticleRadius + 1e-6;
+
     maxParticleRadius = F(0);
     for (auto& p : particles2D) maxParticleRadius = std::max(maxParticleRadius, p.radius);
-    cellSize = two * maxParticleRadius;
+    cellSize = two * maxParticleRadius + 1e-6;;
+    if (particles2D.empty())
+    {
+        cellSize = F(0);                 // nothing to size against
+        return;
+    }
 }
 
 void Simulation::buildGridDataStructure()
@@ -152,25 +187,25 @@ void Simulation::insertParticlesIntoGrid()
     // 2) Standard insertion (possibly wrapping in X)
     for (I i = 0; i < (I)particles2D.size(); ++i) {
         const Particle2D &p = particles2D[i];
-        // compute world‐space AABB of this particle
-        F x0 = p.pos(0) - p.effectiveRadius();
-        F x1 = p.pos(0) + p.effectiveRadius();
-        F y0 = p.pos(1) - p.effectiveRadius();
-        F y1 = p.pos(1) + p.effectiveRadius();
-
+    
+        // Use a wrapped x only to build the AABB for cell indexing
+        const F cx = periodicX ? wrapX(p.pos(0)) : p.pos(0);
+        const F r  = p.effectiveRadius();
+    
+        const F x0 = cx - r, x1 = cx + r;
+        const F y0 = p.pos(1) - r, y1 = p.pos(1) + r;
+    
         int minCX = (int)std::floor((x0 - minX) / cellSize);
         int maxCX = (int)std::floor((x1 - minX) / cellSize);
         int minCY = (int)std::floor((y0 - minY) / cellSize);
         int maxCY = (int)std::floor((y1 - minY) / cellSize);
-
+    
         for (int cy = minCY; cy <= maxCY; ++cy) {
             if (cy < 0 || cy >= numCellsY) continue;
             for (int cxRaw = minCX; cxRaw <= maxCX; ++cxRaw) {
                 int cxWrapped;
-                if (periodicX) {
-                    // wrap X
-                    cxWrapped = ((cxRaw % numCellsX) + numCellsX) % numCellsX;
-                } else {
+                if (periodicX) cxWrapped = ((cxRaw % numCellsX) + numCellsX) % numCellsX;
+                else {
                     if (cxRaw < 0 || cxRaw >= numCellsX) continue;
                     cxWrapped = cxRaw;
                 }
@@ -178,6 +213,7 @@ void Simulation::insertParticlesIntoGrid()
             }
         }
     }
+    
 
     // 3) **Only if** we're in periodic‑X mode, merge the two edge columns
     if (periodicX && numCellsX > 1) {
@@ -355,8 +391,8 @@ void Simulation::applyGlobalPositions(const VectorXF &P)
             /* x , y (always) */
             p.pos = P.segment( S*i, DOF);
 
-            if (periodicX)
-                p.pos(0) = wrapX(p.pos(0));
+            // if (periodicX)
+            //     p.pos(0) = wrapX(p.pos(0));
                 //globalPositions[S*i] = p.pos(0);
 
             /* ε_V if present */
@@ -493,10 +529,10 @@ void Simulation::compute_energy(F &value) const
     }
 
     /* ------------- pin spring (prevent rigid motion) -------------------- */
-    if (periodicX && !particles2D.empty())
-    {
-        value += EnergyFunctions::pinSpring(*this);
-    }
+    // if (periodicX && !particles2D.empty())
+    // {
+    //     value += EnergyFunctions::pinSpring(*this);
+    // }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -555,9 +591,9 @@ void Simulation::compute_gradient(VectorXF &g) const {
     }
 
     // pin spring
-    if (periodicX && !particles2D.empty()) {
-        g[0] += GradientFunctions::pinSpringGradient(*this);
-    }
+    // if (periodicX && !particles2D.empty()) {
+    //     g[0] += GradientFunctions::pinSpringGradient(*this);
+    // }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -597,7 +633,7 @@ void Simulation::compute_hessian(SparseMatrixF &H) const
   }
 
   // 3) pin spring
-  HessianFunctions::pinSpringHessian(*this, add);
+//   HessianFunctions::pinSpringHessian(*this, add);
 }
 
 /* ======================================================================= */
@@ -611,40 +647,50 @@ void Simulation::compute_energy_dyn(F& value)
     /* -------------------------------------------------------------------- */
     /*  make sure history vectors have the right size                       */
     /* -------------------------------------------------------------------- */
+
     if (globalState_1.size() != globalPositions.size()) {
         globalState_1 = globalPositions;
         globalState_2 = globalPositions;
     }
 
-    /* Δ²-like difference  a = xⁿ⁺¹ − 2xⁿ + xⁿ⁻¹ ------------------------- */
-    const VectorXF a = globalPositions
-                     - 2 * globalState_1
-                     + globalState_2;
+    const F inv_h2 = 1 / (timeStep * timeStep);
 
-    const F inv_h2 = 1.0 / (timeStep * timeStep);
+    // a = x^{n+1} − 2 x^{n} + x^{n−1}, but periodic on x
+    VectorXF a = globalPositions - 2*globalState_1 + globalState_2;
 
-    /* ½/h² · aᵀ M a  (M already includes the ε_V row when Soft-DEM on)   */
-    value += half * inv_h2 * a.dot(M * a);
-
-    /* ---------------------------------------------------------------- */
-    /*  neighbour-dependent dash-pot (x,y only, same as before)         */
-    /* ---------------------------------------------------------------- */
-    if (viscosity) {
-        const int S = stride();                 // 2 or 3
-        for (size_t i = 0; i < particles2D.size(); ++i) {
-            F nEff = particles2D[i].prevEffectiveCount;
-
-            VectorXF diff = globalPositions.segment(S * i, DOF)      // x,y
-                          - globalState_1.segment(S * i, DOF);
-
-            value += half * viscosityCoeff * nEff * inv_h2 * diff.squaredNorm();
+    if (periodicX) {
+        const F W = maxX - minX;
+        const int S = stride();
+        for (int i = 0; i < (int)particles2D.size(); ++i) {
+            F x1   = globalPositions(S*i    );
+            F x0   = globalState_1  (S*i    );
+            F xm1  = globalState_2  (S*i    );
+            F dx10 = min_image(x1 - x0 , W);
+            F dx0m = min_image(x0 - xm1, W);
+            a(S*i) = dx10 - dx0m;           // only x component is special
         }
     }
 
-    if (deformation_viscosity) {
+    value += 0.5 * inv_h2 * a.dot(M * a);
+
+    // neighbour-dependent dash-pot (x,y only) — periodic on x
+    if (viscosity) {
+        const int S = stride();
+        const F W = maxX - minX;
+        for (size_t i = 0; i < particles2D.size(); ++i) {
+            F nEff = particles2D[i].prevEffectiveCount;
+
+            F dx = globalPositions(S*i    ) - globalState_1(S*i    );
+            if (periodicX) dx = min_image(dx, W);
+            F dy = globalPositions(S*i + 1) - globalState_1(S*i + 1);
+
+            value += 0.5 * viscosityCoeff * nEff * inv_h2 * (dx*dx + dy*dy);
+        }
+    }
+
+    if (deformation_viscosity)
         for (auto &p : particles2D)
             value += EnergyDynFunctions::deformationViscous(p, *this);
-    }
     
 
     /* ----------------------------- shear-flow drag -------------------- */
@@ -674,7 +720,6 @@ void Simulation::compute_energy_dyn(F& value)
 /* ======================================================================= */
 void Simulation::compute_gradient_dyn(VectorXF& grad)
 {
-    /* static part -------------------------------------------------------- */
     compute_gradient(grad);
 
     if (globalState_1.size() != globalPositions.size()) {
@@ -682,22 +727,35 @@ void Simulation::compute_gradient_dyn(VectorXF& grad)
         globalState_2 = globalPositions;
     }
 
-    const VectorXF a      = globalPositions
-                          - 2 * globalState_1
-                          + globalState_2;
-    const F inv_h2 = 1.0 / (timeStep * timeStep);
+    const F inv_h2 = 1 / (timeStep * timeStep);
 
-    /* 1/h² · M a --------------------------------------------------------- */
+    VectorXF a = globalPositions - 2*globalState_1 + globalState_2;
+    if (periodicX) {
+        const F W = maxX - minX;
+        const int S = stride();
+        for (int i = 0; i < (int)particles2D.size(); ++i) {
+            F x1   = globalPositions(S*i    );
+            F x0   = globalState_1  (S*i    );
+            F xm1  = globalState_2  (S*i    );
+            F dx10 = min_image(x1 - x0 , W);
+            F dx0m = min_image(x0 - xm1, W);
+            a(S*i) = dx10 - dx0m;
+        }
+    }
     grad += inv_h2 * (M * a);
 
-    /* neighbour-dependent dash-pot (x,y only) --------------------------- */
     if (viscosity) {
         const int S = stride();
+        const F W = maxX - minX;
         for (size_t i = 0; i < particles2D.size(); ++i) {
             F nEff = particles2D[i].prevEffectiveCount;
-            grad.segment(S * i, DOF) += viscosityCoeff * nEff * inv_h2 *
-                                         (globalPositions.segment(S * i, DOF) -
-                                          globalState_1  .segment(S * i, DOF));
+
+            F dx = globalPositions(S*i    ) - globalState_1(S*i    );
+            if (periodicX) dx = min_image(dx, W);
+            F dy = globalPositions(S*i + 1) - globalState_1(S*i + 1);
+
+            grad(S*i    ) += viscosityCoeff * nEff * inv_h2 * dx;
+            grad(S*i + 1) += viscosityCoeff * nEff * inv_h2 * dy;
         }
     }
 
@@ -750,7 +808,7 @@ void Simulation::compute_hessian_dyn(SparseMatrixF& H)
     /* static part -------------------------------------------------------- */
     compute_hessian(H);
 
-    const F inv_h2 = 1.0 / (timeStep * timeStep);
+    const F inv_h2 = 1 / (timeStep * timeStep);
 
     /* add 1/h² · M (diagonal) ------------------------------------------- */
     H += inv_h2 * M;
@@ -821,11 +879,11 @@ void Simulation::shearFlowProfile(F y,
     F& d2vf_dy2)  // −(π/L)^2 sin(π y/L)
 {
     const F k = M_PI / L;            // π / L
-    v_fx     = V0 * std::sin(k * y);
-    F c      = std::cos(k * y);
-    F s      = std::sin(k * y);
-    dvf_dy   = V0 * k * c;
-    d2vf_dy2 = -V0 * k * k * s;
+    v_fx     = V0 * std::cos(2 * k * y);
+    F c      = std::sin(2 * k * y);
+    F s      = std::cos(2 * k * y);
+    dvf_dy   = - 2 * V0 * k * s;
+    d2vf_dy2 = - 4 * V0 * k * k * c;
 }
 
 F Simulation::wrapX(F x) const {
@@ -839,26 +897,14 @@ F Simulation::wrapX(F x) const {
     return x - std::floor((x - minX) / W) * W;
 }
 
-F Simulation::periodicDx(F x1,int ix1, F x2,int ix2) const
-{
-    // const F W = maxX - minX;
-    // F dx = x1 - x2;
-    // dx = dx - std::round(dx / W) * W;   // W = maxX-minX
-    // return dx;
-
+F Simulation::periodicDx(F x1,int ix1, F x2,int ix2) const {
     if (!periodicX) return x1 - x2;
-
     const F W = maxX - minX;
-    if (W <= std::numeric_limits<F>::epsilon())
-        return x1 - x2;
-
-    /* true signed separation in the covering space */
-    F dx = (x1 - x2) + (F)(ix1 - ix2) * W;
-
-    /* wrap onto (‑½W , ½W]  –  round() gives the nearest integer */
-    dx -= std::round(dx / W) * W;
+    F dx = x1 - x2;
+    dx -= std::round(dx / W) * W;   // map to (-W/2, W/2]
     return dx;
 }
+
 
 void Simulation::renormalise()
 {
@@ -972,36 +1018,53 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
     F xMin = -0.8f, xMax = 0.8f;
     F yMin = -0.5f, yMax = 0.5f;
 
-    if (!scenarioObjects.empty()) {
+    if (!scenarioObjects.empty())
         if (auto* tun = dynamic_cast<Tunnel2D*>(scenarioObjects[0].get())) {
             const BoundingBox& BB = tun->getBoundingBox();
-            xMin = BB.min_x; 
-            xMax = BB.max_x;
-            yMin = BB.min_y; 
-            yMax = BB.max_y;
+            xMin = BB.min_x;  xMax = BB.max_x;
+            yMin = BB.min_y;  yMax = BB.max_y;
         }
-    }
 
-    /* domain area (needed for safety check) */
-    const F domainArea = (xMax - xMin) * (yMax - yMin);
+    const F domainArea = (xMax - xMin) * (yMax - yMin);          // for safety check
 
     /* ------------------------------------------------------------ 2. RNG */
     std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<F>  rDist(radiusMean, radiusStd);
+    std::mt19937       gen(rd());
     std::uniform_real_distribution<F> uni(-1.0f, 1.0f);
 
-    /* quick over‑crowding check for RSA branch (approximate) */
+    /* ------------------------------------------------------------ 3. Choose radii once */
+    int totalN = bidispersed ? numBig + numSmall : numParticles;
+    std::vector<F> R_target;   R_target.reserve(totalN);
+
+    if (!bidispersed) {                                           // Gaussian branch
+        std::normal_distribution<F> rDist(radiusMean, radiusStd);
+        for (int i = 0; i < totalN; ++i)
+            R_target.push_back(std::max<F>(0.01f, rDist(gen)));
+    } else {                                                      // two sharp peaks
+        R_target.insert(R_target.end(), numBig,   radiusBig);
+        R_target.insert(R_target.end(), numSmall, radiusSmall);
+    }
+
+    /* keep old fields in sync so downstream code stays untouched */
+    numParticles = totalN;
+    radiusMean   = std::accumulate(R_target.begin(), R_target.end(), F(0)) / totalN;
     {
-        const F probeArea = static_cast<F>(M_PI) * radiusMean * radiusMean;
-        if (!densify && static_cast<F>(numParticles) * probeArea > MAX_PACK_FRAC * domainArea) {
+        F sq = 0;
+        for (F r : R_target) sq += (r - radiusMean)*(r - radiusMean);
+        radiusStd = std::sqrt(sq / totalN);
+    }
+
+    /* quick over‑crowding check for RSA mode */
+    if (!densify) {
+        const F probeArea = F(M_PI) * radiusMean * radiusMean;
+        if (static_cast<F>(numParticles) * probeArea > MAX_PACK_FRAC * domainArea) {
             std::cerr << "[RSA] Too many particles for the available space (area ratio > "
                       << MAX_PACK_FRAC << "). Aborting.\n";
             return {};
         }
     }
 
-    /* plain RSA branch (unchanged) */
+    /* ------------------------------------------------------------ 4. Plain RSA branch */
     if (!densify) {
         std::vector<Particle2D> particles;
         particles.reserve(numParticles);
@@ -1010,15 +1073,16 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
         for (int i = 0; i < numParticles; ++i) {
             bool ok = false;
             int attempts = 0;
+            const F targetR = R_target[i];
+
             Particle2D cand(0.0f, *this);
 
             while (!ok && attempts < maxAttemptsPerParticle) {
                 ++attempts;
-                F r = std::max<F>(F(0.01f), rDist(gen));
-                cand = Particle2D(r, *this);
-                cand.ix = 0;
+                cand            = Particle2D(targetR, *this);
+                cand.ix         = 0;
 
-                std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
+                std::uniform_real_distribution<F> distY(yMin + targetR, yMax - targetR);
                 cand.pos << distX(gen), distY(gen);
                 cand.pos(0) = std::clamp(cand.pos(0), xMin, std::nextafter(xMax, xMin));
 
@@ -1027,12 +1091,17 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
                     F dx = periodicDx(cand.pos(0), cand.ix, ex.pos(0), ex.ix);
                     F dy = cand.pos(1) - ex.pos(1);
                     if (std::sqrt(dx*dx + dy*dy) < cand.radius + ex.radius) {
-                        ok = false;
-                        break;
+                        ok = false;  break;
                     }
                 }
             }
+
             if (ok) {
+                if (bidispersed) {                            // colour by family
+                    bool isBig = (i < numBig);
+                    cand.color = isBig ? Color(0.9f,0.1f,0.1f)   // red-ish
+                                       : Color(0.1f,0.2f,0.8f);  // blue-ish
+                }
                 cand.X0 = cand.pos;
                 particles.push_back(std::move(cand));
             } else {
@@ -1041,41 +1110,32 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
         }
         return particles;
     }
-    // std::cout << "Dense" << std::endl;
-    /* dense mode (densify == true) */
-    auto clampX = [&](Particle2D& p) {
-        if (periodicX) {
-            p.pos(0) = wrapX(p.pos(0));
-        } else {
-            F r = p.radius;
-            p.pos(0) = std::clamp(p.pos(0), xMin + r, xMax - r);
-        }
+
+    /* ------------------------------------------------------------ 5. Dense (densify==true) branch */
+    auto clampX = [&](Particle2D& p){
+        if (periodicX) p.pos(0) = wrapX(p.pos(0));
+        else           p.pos(0) = std::clamp(p.pos(0), xMin + p.radius, xMax - p.radius);
     };
 
-    /* sample target radii */
-    std::vector<F> R_target(numParticles);
-    for (F& r : R_target) {
-        r = std::max<F>(F(0.01f), rDist(gen));
+    /* safety: total requested area */
+    {
+        const F PI = std::acos(F(-1));
+        F totalArea = 0;
+        for (F r : R_target) totalArea += PI * r * r;
+        if (totalArea > MAX_PACK_FRAC * domainArea) {
+            std::cerr << "[densify] Requested " << numParticles
+                      << " particles cannot fit (area ratio = "
+                      << (totalArea / domainArea) << " > " << MAX_PACK_FRAC
+                      << "). Aborting.\n";
+            return {};
+        }
     }
 
-    /* safety: total area check */
-    F totalArea = 0.0f;
-    const F PI = std::acos(F(-1));
-    for (const F r : R_target) {
-        totalArea += PI * r * r;
-    }
-    if (totalArea > MAX_PACK_FRAC * domainArea) {
-        std::cerr << "[densify] Requested " << numParticles
-                  << " particles cannot fit (area ratio = " << (totalArea / domainArea)
-                  << " > " << MAX_PACK_FRAC << "). Aborting.\n";
-        return {};
-    }
-
-    /* hex seed */
+    /* ---------- hex‑seed  + growth relax ------------------------------ */
     const F a  = 2.0f * radiusMean * SHRINK;
     const F ay = a * std::sqrt(3.0f) / 2.0f;
-    std::vector<Particle2D> discs;
-    discs.reserve(numParticles);
+
+    std::vector<Particle2D> discs;   discs.reserve(numParticles);
 
     int row = 0;
     for (F y = yMin + ay; y < yMax - ay && discs.size() < static_cast<size_t>(numParticles);
@@ -1086,49 +1146,65 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
              x < xMax - a && discs.size() < static_cast<size_t>(numParticles);
              x += a)
         {
-            Particle2D p(R_target[discs.size()] * SHRINK, *this);
-            p.ix = 0;
+            size_t idx = discs.size();
+            Particle2D p(R_target[idx] * SHRINK, *this);
+            p.ix  = 0;
             p.pos << x, y;
-            p.X0 = p.pos;
+            p.X0  = p.pos;
             clampX(p);
+
+            if (bidispersed) {
+                bool isBig = (idx < static_cast<size_t>(numBig));
+                p.color = isBig ? Color(0.9f,0.1f,0.1f)
+                                : Color(0.1f,0.2f,0.8f);
+            }
             discs.push_back(std::move(p));
         }
     }
 
-    /* top‑up if lattice too small */
+    /* ---------- top‑up if lattice too small --------------------------- */
     std::uniform_real_distribution<F> distX(xMin, xMax);
-    int topupAttempts = 0;
+    int  topupAttempts = 0;
     const int MAX_TOPUP = 50 * numParticles;
+
     while (discs.size() < static_cast<size_t>(numParticles) &&
            topupAttempts < MAX_TOPUP)
     {
         ++topupAttempts;
-        F r = R_target[discs.size()] * SHRINK;
+        size_t idx = discs.size();
+        F r = R_target[idx] * SHRINK;
+
         Particle2D p(r, *this);
         std::uniform_real_distribution<F> distY(yMin + r, yMax - r);
-        p.ix = 0;
+        p.ix  = 0;
         p.pos << distX(gen), distY(gen);
-        p.X0 = p.pos;
+        p.X0  = p.pos;
         clampX(p);
+
+        if (bidispersed) {
+            bool isBig = (idx < static_cast<size_t>(numBig));
+            p.color = isBig ? Color(0.9f,0.1f,0.1f)
+                            : Color(0.1f,0.2f,0.8f);
+        }
         discs.push_back(std::move(p));
-        // std::cout << p.pos(0) << std::endl;
     }
+
     if (discs.size() < static_cast<size_t>(numParticles)) {
         std::cerr << "[densify] Could seed only " << discs.size()
                   << " / " << numParticles << " discs. Aborting.\n";
         return {};
     }
-    /* jitter */
+
+    /* ---------- jitter ------------------------------------------------- */
     for (auto& p : discs) {
         p.pos(0) += uni(gen) * JITTER * radiusMean;
         p.pos(1) += uni(gen) * JITTER * radiusMean;
-        p.pos(1) = std::clamp(p.pos(1), yMin + p.radius, yMax - p.radius);
+        p.pos(1)  = std::clamp(p.pos(1), yMin + p.radius, yMax - p.radius);
         clampX(p);
-        // std::cout << p.pos(0) << std::endl;
     }
 
-    /* wall relax helper */
-    auto wallRelax = [&](std::vector<Particle2D>& ps) {
+    /* ---------- helper to keep discs inside tunnel walls -------------- */
+    auto wallRelax = [&](std::vector<Particle2D>& ps){
         for (auto& p : ps) {
             F pen = (yMin + p.radius) - p.pos(1);
             if (pen > 0) p.pos(1) += pen + TOL * radiusMean;
@@ -1138,12 +1214,12 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
         }
     };
 
-    /* growth + relax */
+    /* ---------- growth‑and‑relax sweeps ------------------------------- */
     for (int sweep = 0; sweep < MAX_RELAX; ++sweep) {
         F g = std::pow((F)(sweep + 1) / (F)MAX_RELAX, 3.0f);
-        for (size_t i = 0; i < discs.size(); ++i) {
+        for (size_t i = 0; i < discs.size(); ++i)
             discs[i].radius = SHRINK * (1.0f - g) * R_target[i] + g * R_target[i];
-        }
+
         wallRelax(discs);
 
         F maxOv;
@@ -1154,25 +1230,27 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
                 std::cerr << "[densify] Relaxation stalled (" << innerIter << "). Aborting.\n";
                 return {};
             }
+
             maxOv = 0.0f;
             std::shuffle(discs.begin(), discs.end(), gen);
+
             for (size_t i = 0; i < discs.size(); ++i)
             for (size_t j = i + 1; j < discs.size(); ++j) {
-                auto& a = discs[i];
-                auto& b = discs[j];
+                auto& a = discs[i];  auto& b = discs[j];
                 F dx = periodicDx(a.pos(0), a.ix, b.pos(0), b.ix);
                 F dy = a.pos(1) - b.pos(1);
                 F d2 = dx*dx + dy*dy;
                 F rSum = a.radius + b.radius;
                 if (d2 >= rSum*rSum || d2 < 1e-12f) continue;
-                F d = std::sqrt(d2);
+
+                F d  = std::sqrt(d2);
                 F ov = rSum - d;
                 maxOv = std::max(maxOv, ov);
+
                 F push = STEP_FRAC * ov / d;
                 a.pos(0) += dx * push;  a.pos(1) += dy * push;
                 b.pos(0) -= dx * push;  b.pos(1) -= dy * push;
-                clampX(a); clampX(b);
-                // std::cout << a.pos(0) << std::endl;
+                clampX(a);  clampX(b);
             }
             wallRelax(discs);
         } while (maxOv > TOL * radiusMean);
@@ -1181,6 +1259,7 @@ std::vector<Particle2D> Simulation::createRandomParticles2D()
     for (auto& p : discs) p.X0 = p.pos;
     return discs;
 }
+
 
 
 
@@ -1401,7 +1480,7 @@ int Tunnel2D::detectCollision(const Particle2D& p) const
 }
 
 Particle2D::Particle2D(F radius, const Simulation& sim)
-    : pos(Vector2F::Zero()), vel(Vector2F::Zero()), acc(Vector2F::Zero()), radius(radius)
+    : pos(Vector2F::Zero()), radius(radius)
 {
     // For a 2D disc, mass = area * density.
     mass = M_PI * radius * radius * sim.density;
@@ -1415,7 +1494,7 @@ Particle2D::Particle2D(F radius, const Simulation& sim)
 
 
 Particle3D::Particle3D(F radius, const Simulation& sim)
-    : pos(Vector3F::Zero()), vel(Vector3F::Zero()), acc(Vector3F::Zero()), radius(radius)
+    : pos(Vector3F::Zero()), radius(radius)
 {
     // For a sphere, mass = volume * density.
     mass = (4.0 / 3.0) * M_PI * std::pow(radius, 3) * sim.density;
